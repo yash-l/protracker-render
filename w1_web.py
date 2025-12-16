@@ -181,7 +181,7 @@ a{color:#93c5fd;text-decoration:none}
 async def setup():
     if cfg["is_setup_done"]:
         return redirect("/login")
-    return render_template_string(STYLE + """
+    return await render_template_string(STYLE + """
 <div class=auth>
 <h3>Initial Setup</h3>
 <form method=post action=/do_setup>
@@ -224,7 +224,7 @@ async def do_setup():
 # ===================== LOGIN =====================
 @app.route("/login")
 async def login():
-    return render_template_string(STYLE + """
+    return await render_template_string(STYLE + """
 <div class=auth>
 <h3>Login</h3>
 <form method=post action=/do_login>
@@ -256,12 +256,11 @@ async def telegram_login():
         try:
             await tg.sign_in(phone=TG_LOGIN["phone"], code=f["code"])
             TG_LOGIN["need_code"] = False
-            # Restart loop or just let the background task pick it up
             return redirect("/")
         except Exception as e:
             return f"OTP Error: {e}"
 
-    return render_template_string(STYLE + """
+    return await render_template_string(STYLE + """
 <div class=auth>
 <h3>Telegram OTP</h3>
 <form method=post>
@@ -278,7 +277,7 @@ async def home():
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT * FROM targets") as c:
             rows = await c.fetchall()
-    return render_template_string(STYLE + """
+    return await render_template_string(STYLE + """
 <div class=auth>
 <h3>Targets</h3>
 {% for r in rows %}
@@ -314,7 +313,7 @@ async def add():
         except Exception as e:
             return f"Error finding user: {e} <br> <a href='/add'>Try Again</a>"
             
-    return render_template_string(STYLE + """
+    return await render_template_string(STYLE + """
 <div class=auth>
 <h3>Add Target</h3>
 <form method=post>

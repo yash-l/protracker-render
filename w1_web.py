@@ -4,8 +4,7 @@ import pytz, secrets
 import aiosqlite
 from quart import Quart, request, redirect, session, Response, render_template_string
 from telethon import TelegramClient
-from telethon.tl.types import UserStatusOnline, InputPhoneContact
-from telethon.tl.functions.contacts import ImportContactsRequest
+from telethon.tl.types import UserStatusOnline
 import python_socks
 
 # ===================== PATHS (RENDER SAFE) =====================
@@ -48,16 +47,14 @@ cfg = load_config()
 TG_LOGIN = {"need_code": False, "phone": None}
 
 # ===================== TELETHON (LAZY INIT FIX) =====================
-client = None  # Start as None to prevent crash
+client = None 
 
 def get_client():
     """Creates the client ONLY if config is valid."""
     global client
     if client is None:
-        # If credentials are missing, we cannot create client yet
         if not cfg["api_id"] or not cfg["api_hash"]:
             return None
-            
         client = TelegramClient(
             "session_pro",
             cfg["api_id"],
@@ -96,7 +93,6 @@ def now():
 
 # ===================== TRACKER =====================
 async def tracker_loop():
-    # Wait until setup is actually done
     while not cfg["is_setup_done"]:
         await asyncio.sleep(5)
 
@@ -120,7 +116,7 @@ async def tracker_loop():
     memory = {}
     while True:
         try:
-            tg = get_client() # Re-fetch to be safe
+            tg = get_client()
             if not tg or not tg.is_connected():
                 await asyncio.sleep(5)
                 continue
@@ -165,14 +161,165 @@ def guard():
     if "user" not in session:
         return redirect("/login")
 
-# ===================== STYLES =====================
+# ===================== ADVANCED UI/UX STYLES =====================
+# This block defines the modern "Glassmorphism" look
 STYLE = """
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <style>
-body{background:#0f172a;color:white;font-family:sans-serif}
-.auth{max-width:400px;margin:50px auto;background:#1e293b;padding:25px;border-radius:15px}
-input,button{width:100%;padding:12px;margin:8px 0;border-radius:10px;border:none}
-button{background:#3b82f6;color:white}
-a{color:#93c5fd;text-decoration:none}
+:root {
+    --bg-color: #0f172a;
+    --card-bg: rgba(30, 41, 59, 0.7);
+    --primary: #3b82f6;
+    --primary-hover: #2563eb;
+    --text-main: #f1f5f9;
+    --text-sub: #94a3b8;
+    --border: rgba(255, 255, 255, 0.1);
+    --green-glow: #22c55e;
+    --red-dim: #ef4444;
+}
+
+body {
+    background: radial-gradient(circle at top, #1e293b, #0f172a);
+    color: var(--text-main);
+    font-family: system-ui, -apple-system, sans-serif;
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Animations */
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(34, 197, 94, 0); } 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); } }
+
+/* Glass Card */
+.glass-container {
+    background: var(--card-bg);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 2rem;
+    width: 90%;
+    max-width: 420px;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3);
+    animation: fadeIn 0.5s ease-out;
+}
+
+.dashboard-container {
+    width: 95%;
+    max-width: 600px;
+    margin-top: 20px;
+    padding-bottom: 80px; /* Space for FAB */
+    align-self: center;
+    justify-content: flex-start;
+}
+
+/* Typography */
+h3 { margin: 0 0 1.5rem 0; font-size: 1.5rem; font-weight: 700; text-align: center; letter-spacing: -0.025em; }
+p { color: var(--text-sub); margin: 0.5rem 0; }
+small { font-size: 0.85rem; color: var(--text-sub); }
+
+/* Forms */
+input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 14px;
+    margin-bottom: 12px;
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    color: white;
+    font-size: 1rem;
+    transition: all 0.2s;
+}
+input:focus { outline: none; border-color: var(--primary); background: rgba(15, 23, 42, 0.9); }
+
+/* Buttons */
+button {
+    width: 100%;
+    padding: 14px;
+    background: var(--primary);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    font-weight: 600;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background 0.2s;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+}
+button:hover { background: var(--primary-hover); }
+
+/* Dashboard Items */
+.target-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    transition: transform 0.2s;
+}
+.target-card:active { transform: scale(0.98); }
+
+.user-info { display: flex; flex-direction: column; }
+.username { font-weight: 600; font-size: 1.1rem; }
+.status-badge { 
+    padding: 6px 12px; 
+    border-radius: 20px; 
+    font-size: 0.8rem; 
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.status-online {
+    background: rgba(34, 197, 94, 0.2);
+    color: #4ade80;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.dot {
+    width: 8px; 
+    height: 8px; 
+    background: #4ade80; 
+    border-radius: 50%; 
+    animation: pulse 2s infinite;
+}
+
+.status-offline {
+    background: rgba(148, 163, 184, 0.1);
+    color: var(--text-sub);
+}
+
+/* Floating Action Button (FAB) */
+.fab {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--primary);
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 24px;
+    text-decoration: none;
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+    transition: transform 0.2s;
+}
+.fab:hover { transform: scale(1.1); }
+
+.link-btn { text-align: center; display: block; margin-top: 15px; color: var(--primary); }
 </style>
 """
 
@@ -182,22 +329,26 @@ async def setup():
     if cfg["is_setup_done"]:
         return redirect("/login")
     return await render_template_string(STYLE + """
-<div class=auth>
-<h3>Initial Setup</h3>
-<form method=post action=/do_setup>
-<input name=api_id placeholder="API ID" required>
-<input name=api_hash placeholder="API HASH" required>
-<input name=phone placeholder="+91..." required>
-<hr>
-<input name=username placeholder="Admin Username" required>
-<input type=password name=password placeholder="Admin Password" required>
-<button>Save</button>
-</form>
+<div class="glass-container">
+    <h3>🚀 Tracker Setup</h3>
+    <form method=post action=/do_setup>
+        <p>Telegram API Details</p>
+        <input name=api_id placeholder="API ID (e.g. 12345)" type="number" required>
+        <input name=api_hash placeholder="API Hash" required>
+        <input name=phone placeholder="Your Phone (+91...)" required>
+        
+        <p style="margin-top:20px">Admin Security</p>
+        <input name=username placeholder="Create Username" required>
+        <input type=password name=password placeholder="Create Password" required>
+        
+        <button style="margin-top:10px">Initialize System</button>
+    </form>
 </div>
 """)
 
 @app.route("/do_setup", methods=["POST"])
 async def do_setup():
+    # FIX: No Restart Loop here. Updates config in memory and starts client.
     global cfg
     f = await request.form
     cfg.update({
@@ -209,29 +360,20 @@ async def do_setup():
         "is_setup_done": True
     })
     save_config(cfg)
-    
-    # Initialize client now that we have credentials
-    get_client()
-    
-    # Trigger restart to refresh background tasks safely
-    if os.path.exists("session_pro.session"):
-        try:
-            os.remove("session_pro.session")
-        except:
-            pass
-    os.execv(sys.executable, ["python"] + sys.argv)
+    get_client() # Lazy load init
+    return redirect("/login")
 
 # ===================== LOGIN =====================
 @app.route("/login")
 async def login():
     return await render_template_string(STYLE + """
-<div class=auth>
-<h3>Login</h3>
-<form method=post action=/do_login>
-<input name=username placeholder=Username required>
-<input type=password name=password placeholder=Password required>
-<button>Login</button>
-</form>
+<div class="glass-container">
+    <h3>🔐 Admin Access</h3>
+    <form method=post action=/do_login>
+        <input name=username placeholder="Username" required>
+        <input type=password name=password placeholder="Password" required>
+        <button>Enter Dashboard</button>
+    </form>
 </div>
 """)
 
@@ -246,10 +388,8 @@ async def do_login():
 # ===================== TELEGRAM OTP =====================
 @app.route("/telegram-login", methods=["GET", "POST"])
 async def telegram_login():
-    # Ensure client exists
     tg = get_client()
-    if not tg:
-         return "Error: Client not initialized. Complete setup first."
+    if not tg: return "Error: System not initialized."
 
     if request.method == "POST":
         f = await request.form
@@ -258,16 +398,16 @@ async def telegram_login():
             TG_LOGIN["need_code"] = False
             return redirect("/")
         except Exception as e:
-            return f"OTP Error: {e}"
+            return f"<div class='glass-container'><h3>❌ Error</h3><p>{e}</p><a href='/telegram-login' class='link-btn'>Try Again</a></div>"
 
     return await render_template_string(STYLE + """
-<div class=auth>
-<h3>Telegram OTP</h3>
-<form method=post>
-<input name=code placeholder="12345" required>
-<button>Verify</button>
-</form>
-<p>Check your Telegram app for the code.</p>
+<div class="glass-container">
+    <h3>📲 Verify Telegram</h3>
+    <p>We sent a code to your Telegram app.</p>
+    <form method=post>
+        <input name=code placeholder="Enter OTP Code" required type="number">
+        <button>Verify & Start</button>
+    </form>
 </div>
 """)
 
@@ -277,20 +417,43 @@ async def home():
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT * FROM targets") as c:
             rows = await c.fetchall()
-    return await render_template_string(STYLE + """
-<div class=auth>
-<h3>Targets</h3>
-{% for r in rows %}
-<p>
-    <b>{{r[2]}}</b> <br>
-    Status: {{r[3]}} <br>
-    <small>Last Seen: {{r[4]}}</small>
-</p>
-<hr>
-{% endfor %}
-<a href=/add>+ Add Target</a>
+            
+    # Logic to format rows into cards
+    cards_html = ""
+    for r in rows:
+        uid, username, target_input, status, last_seen = r
+        
+        status_class = "status-online" if status == "online" else "status-offline"
+        dot_html = "<div class='dot'></div>" if status == "online" else ""
+        
+        cards_html += f"""
+        <div class="target-card">
+            <div class="user-info">
+                <div class="username">{username if username else target_input}</div>
+                <small>Last Seen: {last_seen}</small>
+            </div>
+            <div class="status-badge {status_class}">
+                {dot_html}
+                {status.upper()}
+            </div>
+        </div>
+        """
+
+    if not rows:
+        cards_html = "<p style='text-align:center; padding:20px;'>No targets being tracked yet.</p>"
+
+    return await render_template_string(STYLE + f"""
+<div class="dashboard-container" style="display:block">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+        <h3>📡 Live Tracker</h3>
+        <small style="color:var(--primary)">RUNNING</small>
+    </div>
+    
+    {cards_html}
+
+    <a href="/add" class="fab">+</a>
 </div>
-""", rows=rows)
+""")
 
 # ===================== ADD TARGET =====================
 @app.route("/add", methods=["GET","POST"])
@@ -298,9 +461,7 @@ async def add():
     if request.method == "POST":
         f = await request.form
         tg = get_client()
-        if not tg:
-            return "Error: Telegram client not active."
-            
+        if not tg: return "Error: Client down."
         try:
             e = await tg.get_entity(f["target"])
             async with aiosqlite.connect(DB_FILE) as db:
@@ -311,16 +472,16 @@ async def add():
                 await db.commit()
             return redirect("/")
         except Exception as e:
-            return f"Error finding user: {e} <br> <a href='/add'>Try Again</a>"
+             return await render_template_string(STYLE + f"<div class='glass-container'><h3>❌ Failed</h3><p>{e}</p><a href='/add' class='link-btn'>Try Again</a></div>")
             
     return await render_template_string(STYLE + """
-<div class=auth>
-<h3>Add Target</h3>
-<form method=post>
-<input name=target placeholder="username (e.g. @elonmusk)" required>
-<button>Add</button>
-</form>
-<a href="/">Cancel</a>
+<div class="glass-container">
+    <h3>🎯 Add Target</h3>
+    <form method=post>
+        <input name=target placeholder="Username (e.g. @elonmusk)" required>
+        <button>Start Tracking</button>
+    </form>
+    <a href="/" class="link-btn">Cancel</a>
 </div>
 """)
 
@@ -329,7 +490,6 @@ async def add():
 async def start():
     print("🔑 RECOVERY KEY:", cfg["recovery_key"])
     await init_db()
-    # Only start tracker loop; it will wait inside if setup isn't done
     app.add_background_task(tracker_loop)
 
 # ===================== RENDER SERVER =====================

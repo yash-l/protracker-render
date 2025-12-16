@@ -116,13 +116,13 @@ async def download_pic(user_entity, tg):
     except: pass
     return "default.png"
 
-# ===================== CORE TRACKER LOGIC =====================
+# ===================== CORE TRACKER LOGIC (OPTIMIZED SPEED) =====================
 async def tracker_loop():
     while True:
         try:
             tg = get_client()
             if not tg or not tg.is_connected() or not await tg.is_user_authorized():
-                await asyncio.sleep(5)
+                await asyncio.sleep(2)
                 continue
 
             async with aiosqlite.connect(DB_FILE) as db:
@@ -130,10 +130,8 @@ async def tracker_loop():
                     targets = await cursor.fetchall()
 
             if not targets:
-                await asyncio.sleep(5)
+                await asyncio.sleep(2)
                 continue
-
-            memory = {} # Local loop memory
             
             for (uid, name) in targets:
                 try:
@@ -141,35 +139,34 @@ async def tracker_loop():
                     status = 'online' if isinstance(u.status, UserStatusOnline) else 'offline'
                     current_time = now_str()
 
-                    # Simple Logic: Update "Last Seen" always
+                    # Update "Last Seen"
                     async with aiosqlite.connect(DB_FILE) as db:
                         await db.execute('UPDATE targets SET current_status = ?, last_seen = ? WHERE user_id = ?', (status, current_time, uid))
                         await db.commit()
 
                     # Session Logic
                     if status == 'online':
-                        # Check if we already logged an open session recently
                         async with aiosqlite.connect(DB_FILE) as db:
                             async with db.execute('SELECT id FROM sessions WHERE user_id = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1', (uid,)) as c:
                                 open_session = await c.fetchone()
                             
                             if not open_session:
-                                # Start new session
                                 await db.execute('INSERT INTO sessions (user_id, status, start_time) VALUES (?, ?, ?)', (uid, 'ONLINE', current_time))
                                 await db.commit()
                     else:
-                        # Close open session if user went offline
                         async with aiosqlite.connect(DB_FILE) as db:
                              await db.execute('UPDATE sessions SET end_time = ? WHERE user_id = ? AND end_time IS NULL', (current_time, uid))
                              await db.commit()
                 except Exception as e:
-                    # print(f"Error tracking {uid}: {e}")
                     pass
-                await asyncio.sleep(1) # Rate limit per user
+                
+                # ⚡ FAST MODE: Only wait 0.1s between users (was 1.0s)
+                await asyncio.sleep(0.1) 
             
-            await asyncio.sleep(5) # Loop interval
+            # ⚡ FAST MODE: Only wait 1.5s before restarting loop (was 5.0s)
+            await asyncio.sleep(1.5) 
         except:
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
 
 # ===================== UI STYLES (GLASSMORPHISM) =====================
 STYLE = """

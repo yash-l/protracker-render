@@ -3,14 +3,15 @@ from datetime import datetime
 import pytz, secrets
 import aiosqlite
 from quart import Quart, request, redirect, session, Response, render_template_string
-from telethon import TelegramClient
+from telethon import TelegramClient, errors
 from telethon.tl.types import UserStatusOnline
 import python_socks
 
-# ===================== PATHS (RENDER SAFE) =====================
+# ===================== PATHS =====================
 BASE_DIR = "/opt/data" if os.path.exists("/opt/data") else "."
 DB_FILE = f"{BASE_DIR}/tracker.db"
 CONFIG_FILE = f"{BASE_DIR}/config.json"
+SESSION_FILE = f"{BASE_DIR}/session_pro"
 PIC_FOLDER = f"{BASE_DIR}/profile_pics"
 os.makedirs(PIC_FOLDER, exist_ok=True)
 
@@ -18,7 +19,7 @@ os.makedirs(PIC_FOLDER, exist_ok=True)
 DEFAULT_CONFIG = {
     "api_id": 0,
     "api_hash": "",
-    "phone": "",
+    "phone": "",  # Will be set in the new phone screen
     "admin_username": "admin",
     "admin_password": "password",
     "timezone": "Asia/Kolkata",
@@ -43,337 +44,174 @@ def save_config(c):
 
 cfg = load_config()
 
-# ===================== TELEGRAM LOGIN STATE =====================
-TG_LOGIN = {"need_code": False, "phone": None}
-
-# ===================== TELETHON (LAZY INIT FIX) =====================
+# ===================== TELETHON CLIENT =====================
 client = None 
 
 def get_client():
-    """Creates the client ONLY if config is valid."""
     global client
     if client is None:
         if not cfg["api_id"] or not cfg["api_hash"]:
             return None
         client = TelegramClient(
-            "session_pro",
+            SESSION_FILE,
             cfg["api_id"],
             cfg["api_hash"],
             proxy=(python_socks.HTTP, "127.0.0.1", 8080, True) if False else None
         )
     return client
 
-# ===================== QUART =====================
+# ===================== QUART APP =====================
 app = Quart(__name__)
 app.secret_key = cfg["secret_key"]
 
 # ===================== DATABASE =====================
 async def init_db():
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS targets(
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            display_name TEXT,
-            current_status TEXT,
-            last_seen TEXT
-        )""")
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS sessions(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            status TEXT,
-            time TEXT
-        )""")
+        await db.execute("CREATE TABLE IF NOT EXISTS targets(user_id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, current_status TEXT, last_seen TEXT)")
+        await db.execute("CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, status TEXT, time TEXT)")
         await db.commit()
 
-# ===================== HELPERS =====================
-def now():
-    return datetime.now(pytz.timezone(cfg["timezone"])).strftime("%I:%M %p")
-
-# ===================== TRACKER =====================
+# ===================== TRACKER LOOP =====================
 async def tracker_loop():
-    while not cfg["is_setup_done"]:
-        await asyncio.sleep(5)
-
-    tg = get_client()
-    if tg is None:
-        print("⚠️ Waiting for client initialization...")
-        return
-
-    try:
-        if not tg.is_connected():
-            await tg.start(phone=cfg["phone"])
-    except Exception as e:
-        if "code" in str(e).lower() or "auth" in str(e).lower():
-            TG_LOGIN["need_code"] = True
-            TG_LOGIN["phone"] = cfg["phone"]
-            print("📲 Telegram OTP required → /telegram-login")
-            return
-        print(f"Tracker Error: {e}")
-        return
-
-    memory = {}
     while True:
         try:
             tg = get_client()
-            if not tg or not tg.is_connected():
+            # If not connected or not authorized, wait.
+            # We don't force login here anymore; the UI flow handles it.
+            if not tg or not tg.is_connected() or not await tg.is_user_authorized():
                 await asyncio.sleep(5)
                 continue
 
+            # Tracking Logic
             async with aiosqlite.connect(DB_FILE) as db:
                 async with db.execute("SELECT user_id FROM targets") as c:
                     users = await c.fetchall()
 
+            memory = {}
             for (uid,) in users:
                 try:
                     u = await tg.get_entity(uid)
                     status = "online" if isinstance(u.status, UserStatusOnline) else "offline"
+                    # Simple log logic
+                    now_str = datetime.now(pytz.timezone(cfg["timezone"])).strftime("%I:%M %p")
                     
-                    if memory.get(uid) != status:
-                        async with aiosqlite.connect(DB_FILE) as db:
-                            await db.execute(
-                                "INSERT INTO sessions (user_id,status,time) VALUES (?,?,?)",
-                                (uid, status.upper(), now())
-                            )
-                            await db.execute(
-                                "UPDATE targets SET current_status=?, last_seen=? WHERE user_id=?",
-                                (status, now(), uid)
-                            )
-                            await db.commit()
-                    memory[uid] = status
-                except Exception as e:
-                    print(f"Error checking {uid}: {e}")
+                    async with aiosqlite.connect(DB_FILE) as db:
+                        # Update Last Seen
+                        await db.execute("UPDATE targets SET current_status=?, last_seen=? WHERE user_id=?", (status, now_str, uid))
+                        
+                        # Log session if status changed
+                        # (In a real scenario, you'd check previous status from DB or memory)
+                        if status == "online":
+                            # check if last entry was online to avoid duplicate spam
+                            async with db.execute("SELECT status FROM sessions WHERE user_id=? ORDER BY id DESC LIMIT 1", (uid,)) as cur:
+                                last = await cur.fetchone()
+                            if not last or last[0] != "ONLINE":
+                                await db.execute("INSERT INTO sessions (user_id,status,time) VALUES (?,?,?)", (uid, "ONLINE", now_str))
+                        await db.commit()
+                except:
+                    pass
             await asyncio.sleep(5)
-        except Exception as e:
-            print(f"Loop Error: {e}")
+        except:
             await asyncio.sleep(5)
 
 # ===================== AUTH GUARD =====================
 @app.before_request
-def guard():
-    if request.path.startswith("/static"):
+async def guard():
+    if request.path.startswith("/static"): return
+    # Public routes
+    if request.path in ("/setup", "/do_setup", "/login", "/do_login", "/reset", "/do_reset"):
         return
-    if request.path in ("/setup", "/do_setup", "/login", "/do_login", "/telegram-login"):
-        return
+
+    # 1. Setup Check
     if not cfg["is_setup_done"]:
         return redirect("/setup")
+
+    # 2. Admin Login Check
     if "user" not in session:
         return redirect("/login")
 
-# ===================== ADVANCED UI/UX STYLES =====================
-# This block defines the modern "Glassmorphism" look
+    # 3. Telegram Authorization Check
+    # If we are already on phone/OTP pages, let them pass
+    if request.path in ("/enter-phone", "/send-code", "/telegram-login", "/verify-code"):
+        return
+
+    # For Dashboard or any other page, CHECK if Telegram is connected
+    tg = get_client()
+    if not tg:
+        return redirect("/setup") # Should not happen if setup is done
+    
+    # Connect if needed
+    if not tg.is_connected():
+        try:
+            await tg.connect()
+        except:
+            pass
+    
+    # CRITICAL: If not authorized, FORCE user to Enter Phone Page
+    if not await tg.is_user_authorized():
+        return redirect("/enter-phone")
+
+# ===================== UI STYLES =====================
 STYLE = """
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <style>
-:root {
-    --bg-color: #0f172a;
-    --card-bg: rgba(30, 41, 59, 0.7);
-    --primary: #3b82f6;
-    --primary-hover: #2563eb;
-    --text-main: #f1f5f9;
-    --text-sub: #94a3b8;
-    --border: rgba(255, 255, 255, 0.1);
-    --green-glow: #22c55e;
-    --red-dim: #ef4444;
-}
-
-body {
-    background: radial-gradient(circle at top, #1e293b, #0f172a);
-    color: var(--text-main);
-    font-family: system-ui, -apple-system, sans-serif;
-    margin: 0;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-}
-
-/* Animations */
-@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(34, 197, 94, 0); } 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); } }
-
-/* Glass Card */
-.glass-container {
-    background: var(--card-bg);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid var(--border);
-    border-radius: 20px;
-    padding: 2rem;
-    width: 90%;
-    max-width: 420px;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3);
-    animation: fadeIn 0.5s ease-out;
-}
-
-.dashboard-container {
-    width: 95%;
-    max-width: 600px;
-    margin-top: 20px;
-    padding-bottom: 80px; /* Space for FAB */
-    align-self: center;
-    justify-content: flex-start;
-}
-
-/* Typography */
-h3 { margin: 0 0 1.5rem 0; font-size: 1.5rem; font-weight: 700; text-align: center; letter-spacing: -0.025em; }
-p { color: var(--text-sub); margin: 0.5rem 0; }
-small { font-size: 0.85rem; color: var(--text-sub); }
-
-/* Forms */
-input {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 14px;
-    margin-bottom: 12px;
-    background: rgba(15, 23, 42, 0.6);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    color: white;
-    font-size: 1rem;
-    transition: all 0.2s;
-}
-input:focus { outline: none; border-color: var(--primary); background: rgba(15, 23, 42, 0.9); }
-
-/* Buttons */
-button {
-    width: 100%;
-    padding: 14px;
-    background: var(--primary);
-    color: white;
-    border: none;
-    border-radius: 12px;
-    font-weight: 600;
-    font-size: 1rem;
-    cursor: pointer;
-    transition: background 0.2s;
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
-}
-button:hover { background: var(--primary-hover); }
-
-/* Dashboard Items */
-.target-card {
-    background: var(--card-bg);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 16px;
-    margin-bottom: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    transition: transform 0.2s;
-}
-.target-card:active { transform: scale(0.98); }
-
-.user-info { display: flex; flex-direction: column; }
-.username { font-weight: 600; font-size: 1.1rem; }
-.status-badge { 
-    padding: 6px 12px; 
-    border-radius: 20px; 
-    font-size: 0.8rem; 
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-}
-
-.status-online {
-    background: rgba(34, 197, 94, 0.2);
-    color: #4ade80;
-    border: 1px solid rgba(34, 197, 94, 0.3);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-.dot {
-    width: 8px; 
-    height: 8px; 
-    background: #4ade80; 
-    border-radius: 50%; 
-    animation: pulse 2s infinite;
-}
-
-.status-offline {
-    background: rgba(148, 163, 184, 0.1);
-    color: var(--text-sub);
-}
-
-/* Floating Action Button (FAB) */
-.fab {
-    position: fixed;
-    bottom: 24px;
-    right: 24px;
-    background: var(--primary);
-    width: 56px;
-    height: 56px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: white;
-    font-size: 24px;
-    text-decoration: none;
-    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
-    transition: transform 0.2s;
-}
-.fab:hover { transform: scale(1.1); }
-
-.link-btn { text-align: center; display: block; margin-top: 15px; color: var(--primary); }
+:root { --bg: #0f172a; --card: rgba(30, 41, 59, 0.7); --primary: #3b82f6; --text: #f1f5f9; }
+body { background: radial-gradient(circle at top, #1e293b, #0f172a); color: var(--text); font-family: sans-serif; margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.glass-container { background: var(--card); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; padding: 2rem; width: 90%; max-width: 420px; box-shadow: 0 20px 25px rgba(0,0,0,0.3); animation: fadeIn 0.5s; }
+input { width: 100%; padding: 14px; margin-bottom: 12px; background: rgba(15,23,42,0.6); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; color: white; box-sizing: border-box; font-size: 16px; }
+button { width: 100%; padding: 14px; background: var(--primary); color: white; border: none; border-radius: 12px; font-weight: bold; cursor: pointer; font-size: 16px; }
+h3 { margin-top: 0; text-align: center; }
+@keyframes fadeIn { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
 </style>
 """
 
-# ===================== SETUP =====================
+# ===================== 1. SETUP PAGE =====================
 @app.route("/setup")
 async def setup():
-    if cfg["is_setup_done"]:
-        return redirect("/login")
+    if cfg["is_setup_done"]: return redirect("/login")
     return await render_template_string(STYLE + """
 <div class="glass-container">
-    <h3>🚀 Tracker Setup</h3>
+    <h3>🛠 System Setup</h3>
     <form method=post action=/do_setup>
-        <p>Telegram API Details</p>
-        <input name=api_id placeholder="API ID (e.g. 12345)" type="number" required>
+        <p>Step 1: Telegram API</p>
+        <input name=api_id placeholder="API ID" type="number" required>
         <input name=api_hash placeholder="API Hash" required>
-        <input name=phone placeholder="Your Phone (+91...)" required>
-        
-        <p style="margin-top:20px">Admin Security</p>
+        <hr style="border-color:#ffffff20">
+        <p>Step 2: Admin Security</p>
         <input name=username placeholder="Create Username" required>
         <input type=password name=password placeholder="Create Password" required>
-        
-        <button style="margin-top:10px">Initialize System</button>
+        <button>Save & Continue</button>
     </form>
 </div>
 """)
 
 @app.route("/do_setup", methods=["POST"])
 async def do_setup():
-    # FIX: No Restart Loop here. Updates config in memory and starts client.
     global cfg
     f = await request.form
     cfg.update({
         "api_id": int(f["api_id"]),
         "api_hash": f["api_hash"],
-        "phone": f["phone"],
         "admin_username": f["username"],
         "admin_password": f["password"],
         "is_setup_done": True
     })
     save_config(cfg)
-    get_client() # Lazy load init
+    get_client()
     return redirect("/login")
 
-# ===================== LOGIN =====================
+# ===================== 2. LOGIN PAGE =====================
 @app.route("/login")
 async def login():
     return await render_template_string(STYLE + """
 <div class="glass-container">
-    <h3>🔐 Admin Access</h3>
+    <h3>🔐 Admin Login</h3>
     <form method=post action=/do_login>
         <input name=username placeholder="Username" required>
         <input type=password name=password placeholder="Password" required>
-        <button>Enter Dashboard</button>
+        <button>Login</button>
     </form>
+    <br><a href="/reset" style="color:#ef4444; text-decoration:none; font-size:12px; display:block; text-align:center">Reset System</a>
 </div>
 """)
 
@@ -382,76 +220,105 @@ async def do_login():
     f = await request.form
     if f["username"] == cfg["admin_username"] and f["password"] == cfg["admin_password"]:
         session["user"] = f["username"]
+        # Redirect will be handled by guard() -> if not authorized, it goes to /enter-phone
         return redirect("/")
     return redirect("/login")
 
-# ===================== TELEGRAM OTP =====================
-@app.route("/telegram-login", methods=["GET", "POST"])
-async def telegram_login():
-    tg = get_client()
-    if not tg: return "Error: System not initialized."
-
-    if request.method == "POST":
-        f = await request.form
-        try:
-            await tg.sign_in(phone=TG_LOGIN["phone"], code=f["code"])
-            TG_LOGIN["need_code"] = False
-            return redirect("/")
-        except Exception as e:
-            return f"<div class='glass-container'><h3>❌ Error</h3><p>{e}</p><a href='/telegram-login' class='link-btn'>Try Again</a></div>"
-
+# ===================== 3. ENTER PHONE (NEW FRAME) =====================
+@app.route("/enter-phone")
+async def enter_phone_page():
     return await render_template_string(STYLE + """
 <div class="glass-container">
-    <h3>📲 Verify Telegram</h3>
-    <p>We sent a code to your Telegram app.</p>
-    <form method=post>
-        <input name=code placeholder="Enter OTP Code" required type="number">
-        <button>Verify & Start</button>
+    <h3>📱 Connect Telegram</h3>
+    <p style="color:#94a3b8; text-align:center">Enter your mobile number to start the tracker.</p>
+    <form method=post action=/send-code>
+        <input name=phone placeholder="+919876543210" required>
+        <button>Send OTP</button>
     </form>
 </div>
 """)
 
-# ===================== DASHBOARD =====================
+@app.route("/send-code", methods=["POST"])
+async def send_code():
+    global cfg
+    f = await request.form
+    phone = f["phone"].strip()
+    
+    # Save phone to config
+    cfg["phone"] = phone
+    save_config(cfg)
+    
+    tg = get_client()
+    if not tg: return "Error: API ID missing. Reset app."
+    
+    try:
+        if not tg.is_connected(): await tg.connect()
+        await tg.send_code_request(phone)
+        return redirect("/telegram-login")
+    except Exception as e:
+        return await render_template_string(STYLE + f"<div class='glass-container'><h3>❌ Error</h3><p>{e}</p><a href='/enter-phone' style='color:#3b82f6'>Try Again</a></div>")
+
+# ===================== 4. ENTER OTP =====================
+@app.route("/telegram-login")
+async def telegram_login_page():
+    return await render_template_string(STYLE + f"""
+<div class="glass-container">
+    <h3>💬 Verify OTP</h3>
+    <p style="color:#94a3b8; text-align:center">Code sent to <b>{cfg.get('phone')}</b></p>
+    <form method=post action=/verify-code>
+        <input name=code placeholder="12345" type="number" required>
+        <button>Start Tracker</button>
+    </form>
+    <a href="/enter-phone" style="display:block; text-align:center; margin-top:15px; color:#3b82f6; text-decoration:none">Change Number</a>
+</div>
+""")
+
+@app.route("/verify-code", methods=["POST"])
+async def verify_code():
+    f = await request.form
+    code = f["code"]
+    tg = get_client()
+    
+    try:
+        if not tg.is_connected(): await tg.connect()
+        await tg.sign_in(phone=cfg["phone"], code=code)
+        return redirect("/")
+    except Exception as e:
+         return await render_template_string(STYLE + f"<div class='glass-container'><h3>❌ Invalid Code</h3><p>{e}</p><a href='/telegram-login' style='color:#3b82f6'>Try Again</a></div>")
+
+# ===================== 5. DASHBOARD =====================
 @app.route("/")
 async def home():
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT * FROM targets") as c:
             rows = await c.fetchall()
-            
-    # Logic to format rows into cards
-    cards_html = ""
+
+    cards = ""
     for r in rows:
-        uid, username, target_input, status, last_seen = r
+        status_text = r[3].upper()
+        status_color = "#4ade80" if "ONLINE" in status_text else "#64748b"
+        glow = "box-shadow: 0 0 10px #4ade80;" if "ONLINE" in status_text else ""
         
-        status_class = "status-online" if status == "online" else "status-offline"
-        dot_html = "<div class='dot'></div>" if status == "online" else ""
-        
-        cards_html += f"""
-        <div class="target-card">
-            <div class="user-info">
-                <div class="username">{username if username else target_input}</div>
-                <small>Last Seen: {last_seen}</small>
+        cards += f"""
+        <div style="background:rgba(30,41,59,0.7); border:1px solid rgba(255,255,255,0.1); border-radius:16px; padding:16px; margin-bottom:12px; display:flex; justify-content:space-between; align-items:center; {glow}">
+            <div>
+                <div style="font-weight:bold; font-size:1.1rem">{r[1] or r[2]}</div>
+                <small style="color:#94a3b8">Last seen: {r[4]}</small>
             </div>
-            <div class="status-badge {status_class}">
-                {dot_html}
-                {status.upper()}
-            </div>
+            <div style="color:{status_color}; font-weight:bold; font-size:0.8rem; background:rgba(0,0,0,0.2); padding:4px 8px; border-radius:8px">{status_text}</div>
         </div>
         """
-
-    if not rows:
-        cards_html = "<p style='text-align:center; padding:20px;'>No targets being tracked yet.</p>"
+    
+    if not rows: cards = "<p style='text-align:center; color:#94a3b8'>No targets added.</p>"
 
     return await render_template_string(STYLE + f"""
-<div class="dashboard-container" style="display:block">
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
-        <h3>📡 Live Tracker</h3>
-        <small style="color:var(--primary)">RUNNING</small>
+<div style="width:95%; max-width:600px; padding-bottom:80px">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px">
+        <h3>📡 Active Targets</h3>
+        <span style="background:#22c55e; width:10px; height:10px; border-radius:50%; box-shadow:0 0 10px #22c55e"></span>
     </div>
-    
-    {cards_html}
-
-    <a href="/add" class="fab">+</a>
+    {cards}
+    <a href="/add" style="position:fixed; bottom:24px; right:24px; background:#3b82f6; width:56px; height:56px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:white; text-decoration:none; font-size:28px; box-shadow:0 10px 20px rgba(0,0,0,0.4)">+</a>
 </div>
 """)
 
@@ -461,42 +328,57 @@ async def add():
     if request.method == "POST":
         f = await request.form
         tg = get_client()
-        if not tg: return "Error: Client down."
         try:
             e = await tg.get_entity(f["target"])
             async with aiosqlite.connect(DB_FILE) as db:
-                await db.execute(
-                    "INSERT OR IGNORE INTO targets VALUES (?,?,?,?,?)",
-                    (e.id, e.username or "", f["target"], "checking", "new")
-                )
+                await db.execute("INSERT OR IGNORE INTO targets VALUES (?,?,?,?,?)", (e.id, e.username or "", f["target"], "CHECKING...", "Just now"))
                 await db.commit()
             return redirect("/")
         except Exception as e:
-             return await render_template_string(STYLE + f"<div class='glass-container'><h3>❌ Failed</h3><p>{e}</p><a href='/add' class='link-btn'>Try Again</a></div>")
+            return await render_template_string(STYLE + f"<div class='glass-container'><h3>❌ User Not Found</h3><p>{e}</p><a href='/add' style='color:#3b82f6'>Try Again</a></div>")
             
     return await render_template_string(STYLE + """
 <div class="glass-container">
-    <h3>🎯 Add Target</h3>
+    <h3>🎯 Add New Target</h3>
     <form method=post>
         <input name=target placeholder="Username (e.g. @elonmusk)" required>
         <button>Start Tracking</button>
     </form>
-    <a href="/" class="link-btn">Cancel</a>
+    <a href="/" style="display:block; text-align:center; margin-top:15px; color:#94a3b8; text-decoration:none">Cancel</a>
 </div>
 """)
+
+# ===================== RESET =====================
+@app.route("/reset")
+async def reset():
+    return await render_template_string(STYLE + """
+<div class="glass-container">
+    <h3>⚠️ Factory Reset</h3>
+    <p>This will delete all settings and login data.</p>
+    <form action="/do_reset" method="post">
+        <button style="background:#ef4444">Confirm Reset</button>
+    </form>
+    <a href="/login" style="display:block; text-align:center; margin-top:15px; color:#94a3b8">Cancel</a>
+</div>
+""")
+
+@app.route("/do_reset", methods=["POST"])
+async def do_reset():
+    if os.path.exists(CONFIG_FILE): os.remove(CONFIG_FILE)
+    if os.path.exists(SESSION_FILE + ".session"): os.remove(SESSION_FILE + ".session")
+    global cfg
+    cfg = DEFAULT_CONFIG.copy()
+    os.execv(sys.executable, ["python"] + sys.argv)
 
 # ===================== STARTUP =====================
 @app.before_serving
 async def start():
-    print("🔑 RECOVERY KEY:", cfg["recovery_key"])
     await init_db()
     app.add_background_task(tracker_loop)
 
-# ===================== RENDER SERVER =====================
-import hypercorn.asyncio
-from hypercorn.config import Config
-
 if __name__ == "__main__":
+    from hypercorn.config import Config
+    import hypercorn.asyncio
     c = Config()
     c.bind = [f"0.0.0.0:{os.environ.get('PORT', 10000)}"]
     asyncio.run(hypercorn.asyncio.serve(app, c))

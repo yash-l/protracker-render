@@ -47,13 +47,24 @@ cfg = load_config()
 # ===================== TELEGRAM LOGIN STATE =====================
 TG_LOGIN = {"need_code": False, "phone": None}
 
-# ===================== TELETHON =====================
-client = TelegramClient(
-    "session_pro",
-    cfg["api_id"],
-    cfg["api_hash"],
-    proxy=(python_socks.HTTP, "127.0.0.1", 8080, True) if False else None
-)
+# ===================== TELETHON (LAZY INIT FIX) =====================
+client = None  # Start as None to prevent crash
+
+def get_client():
+    """Creates the client ONLY if config is valid."""
+    global client
+    if client is None:
+        # If credentials are missing, we cannot create client yet
+        if not cfg["api_id"] or not cfg["api_hash"]:
+            return None
+            
+        client = TelegramClient(
+            "session_pro",
+            cfg["api_id"],
+            cfg["api_hash"],
+            proxy=(python_socks.HTTP, "127.0.0.1", 8080, True) if False else None
+        )
+    return client
 
 # ===================== QUART =====================
 app = Quart(__name__)
@@ -85,44 +96,62 @@ def now():
 
 # ===================== TRACKER =====================
 async def tracker_loop():
-    if not cfg["is_setup_done"]:
+    # Wait until setup is actually done
+    while not cfg["is_setup_done"]:
+        await asyncio.sleep(5)
+
+    tg = get_client()
+    if tg is None:
+        print("⚠️ Waiting for client initialization...")
         return
 
     try:
-        await client.start(phone=cfg["phone"])
+        if not tg.is_connected():
+            await tg.start(phone=cfg["phone"])
     except Exception as e:
-        if "code" in str(e).lower():
+        if "code" in str(e).lower() or "auth" in str(e).lower():
             TG_LOGIN["need_code"] = True
             TG_LOGIN["phone"] = cfg["phone"]
             print("📲 Telegram OTP required → /telegram-login")
             return
-        raise
+        print(f"Tracker Error: {e}")
+        return
 
     memory = {}
     while True:
-        async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute("SELECT user_id FROM targets") as c:
-                users = await c.fetchall()
+        try:
+            tg = get_client() # Re-fetch to be safe
+            if not tg or not tg.is_connected():
+                await asyncio.sleep(5)
+                continue
 
-        for (uid,) in users:
-            try:
-                u = await client.get_entity(uid)
-                status = "online" if isinstance(u.status, UserStatusOnline) else "offline"
-                if memory.get(uid) != status:
-                    async with aiosqlite.connect(DB_FILE) as db:
-                        await db.execute(
-                            "INSERT INTO sessions (user_id,status,time) VALUES (?,?,?)",
-                            (uid, status.upper(), now())
-                        )
-                        await db.execute(
-                            "UPDATE targets SET current_status=?, last_seen=? WHERE user_id=?",
-                            (status, now(), uid)
-                        )
-                        await db.commit()
-                memory[uid] = status
-            except:
-                pass
-        await asyncio.sleep(5)
+            async with aiosqlite.connect(DB_FILE) as db:
+                async with db.execute("SELECT user_id FROM targets") as c:
+                    users = await c.fetchall()
+
+            for (uid,) in users:
+                try:
+                    u = await tg.get_entity(uid)
+                    status = "online" if isinstance(u.status, UserStatusOnline) else "offline"
+                    
+                    if memory.get(uid) != status:
+                        async with aiosqlite.connect(DB_FILE) as db:
+                            await db.execute(
+                                "INSERT INTO sessions (user_id,status,time) VALUES (?,?,?)",
+                                (uid, status.upper(), now())
+                            )
+                            await db.execute(
+                                "UPDATE targets SET current_status=?, last_seen=? WHERE user_id=?",
+                                (status, now(), uid)
+                            )
+                            await db.commit()
+                    memory[uid] = status
+                except Exception as e:
+                    print(f"Error checking {uid}: {e}")
+            await asyncio.sleep(5)
+        except Exception as e:
+            print(f"Loop Error: {e}")
+            await asyncio.sleep(5)
 
 # ===================== AUTH GUARD =====================
 @app.before_request
@@ -180,8 +209,16 @@ async def do_setup():
         "is_setup_done": True
     })
     save_config(cfg)
+    
+    # Initialize client now that we have credentials
+    get_client()
+    
+    # Trigger restart to refresh background tasks safely
     if os.path.exists("session_pro.session"):
-        os.remove("session_pro.session")
+        try:
+            os.remove("session_pro.session")
+        except:
+            pass
     os.execv(sys.executable, ["python"] + sys.argv)
 
 # ===================== LOGIN =====================
@@ -209,14 +246,17 @@ async def do_login():
 # ===================== TELEGRAM OTP =====================
 @app.route("/telegram-login", methods=["GET", "POST"])
 async def telegram_login():
-    if not TG_LOGIN["need_code"]:
-        return redirect("/")
+    # Ensure client exists
+    tg = get_client()
+    if not tg:
+         return "Error: Client not initialized. Complete setup first."
+
     if request.method == "POST":
         f = await request.form
         try:
-            await client.sign_in(phone=TG_LOGIN["phone"], code=f["code"])
+            await tg.sign_in(phone=TG_LOGIN["phone"], code=f["code"])
             TG_LOGIN["need_code"] = False
-            app.add_background_task(tracker_loop)
+            # Restart loop or just let the background task pick it up
             return redirect("/")
         except Exception as e:
             return f"OTP Error: {e}"
@@ -228,6 +268,7 @@ async def telegram_login():
 <input name=code placeholder="12345" required>
 <button>Verify</button>
 </form>
+<p>Check your Telegram app for the code.</p>
 </div>
 """)
 
@@ -241,7 +282,12 @@ async def home():
 <div class=auth>
 <h3>Targets</h3>
 {% for r in rows %}
-<p>{{r[2]}} — {{r[3]}}</p>
+<p>
+    <b>{{r[2]}}</b> <br>
+    Status: {{r[3]}} <br>
+    <small>Last Seen: {{r[4]}}</small>
+</p>
+<hr>
 {% endfor %}
 <a href=/add>+ Add Target</a>
 </div>
@@ -252,20 +298,30 @@ async def home():
 async def add():
     if request.method == "POST":
         f = await request.form
-        e = await client.get_entity(f["target"])
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute(
-                "INSERT OR IGNORE INTO targets VALUES (?,?,?,?,?)",
-                (e.id, e.username or "", f["target"], "checking", "new")
-            )
-            await db.commit()
-        return redirect("/")
+        tg = get_client()
+        if not tg:
+            return "Error: Telegram client not active."
+            
+        try:
+            e = await tg.get_entity(f["target"])
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute(
+                    "INSERT OR IGNORE INTO targets VALUES (?,?,?,?,?)",
+                    (e.id, e.username or "", f["target"], "checking", "new")
+                )
+                await db.commit()
+            return redirect("/")
+        except Exception as e:
+            return f"Error finding user: {e} <br> <a href='/add'>Try Again</a>"
+            
     return render_template_string(STYLE + """
 <div class=auth>
+<h3>Add Target</h3>
 <form method=post>
-<input name=target placeholder="username / id" required>
+<input name=target placeholder="username (e.g. @elonmusk)" required>
 <button>Add</button>
 </form>
+<a href="/">Cancel</a>
 </div>
 """)
 
@@ -274,6 +330,7 @@ async def add():
 async def start():
     print("🔑 RECOVERY KEY:", cfg["recovery_key"])
     await init_db()
+    # Only start tracker loop; it will wait inside if setup isn't done
     app.add_background_task(tracker_loop)
 
 # ===================== RENDER SERVER =====================

@@ -496,14 +496,27 @@ async def do_reset():
         return redirect('/setup')
     return "Invalid"
 
+# ===================== 🔥 FIXED STARTUP LOGIC 🔥 =====================
 @app.before_serving
 async def start():
+    # 1. Initialize Database
     await init_db()
-    app.add_background_task(tracker_loop)
+    
+    # 2. Delayed Tracker Start (Crucial for Render)
+    async def delayed_tracker_start():
+        logger.info("⏳ Waiting 15s for Web Server to stabilize...")
+        await asyncio.sleep(15) 
+        logger.info("🚀 Starting Diamond Tracker Loop...")
+        await tracker_loop()
+
+    # 3. Add to background tasks
+    app.add_background_task(delayed_tracker_start)
 
 if __name__ == '__main__':
     from hypercorn.config import Config
     import hypercorn.asyncio
-    c=Config()
-    c.bind=[f"0.0.0.0:{os.environ.get('PORT',10000)}"]
-    asyncio.run(hypercorn.asyncio.serve(app,c))
+    
+    config = Config()
+    config.bind = [f"0.0.0.0:{os.environ.get('PORT', 10000)}"]
+    config.keep_alive_timeout = 120
+    asyncio.run(hypercorn.asyncio.serve(app, config))

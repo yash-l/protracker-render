@@ -29,7 +29,6 @@ CONFIG_FILE = "config.json"
 PIC_FOLDER = "static/profile_pics"
 os.makedirs(PIC_FOLDER, exist_ok=True)
 
-# 🛡️ Production Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("Diamond")
 
@@ -312,6 +311,7 @@ async def tracker_loop():
     last_maint = time.time()
     
     while True:
+        # ✅ FIXED STRUCTURE: TRY/EXCEPT INSIDE THE LOOP
         try:
             if not tracker_client:
                 s_str = os.environ.get("SESSION_STRING") or cfg.get("session_string")
@@ -357,6 +357,8 @@ async def tracker_loop():
     except Exception as e:
         logger.error(f"Fatal Loop Crash: {e}")
         await asyncio.sleep(5)
+    finally:
+        await db.close()
 
 # ===================== 🎨 UI =====================
 STYLE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Diamond Tracker</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet"><style>:root{--bg:#050505;--card:rgba(22,22,22,0.7);--border:rgba(255,255,255,0.08);--accent:#3b82f6;--text:#e5e5e5;--green:#10b981;--red:#ef4444;--glass:blur(16px)}body{margin:0;font-family:'Inter',sans-serif;background:radial-gradient(circle at 50% 0,#1f1f1f,#000);color:var(--text);min-height:100vh;display:flex;flex-direction:column;align-items:center}.container{width:92%;max-width:480px;margin:20px auto 80px}.card{background:var(--card);backdrop-filter:var(--glass);border:1px solid var(--border);border-radius:24px;padding:24px;box-shadow:0 20px 40px -10px rgba(0,0,0,0.6);margin-bottom:16px;animation:fadeUp 0.4s ease-out}.input{width:100%;padding:16px;background:#0a0a0a;border:1px solid #333;border-radius:14px;color:#fff;outline:0;box-sizing:border-box;font-size:16px}.input:focus{border-color:var(--accent)}.btn{width:100%;padding:16px;background:var(--accent);color:#fff;border:0;border-radius:14px;font-weight:700;cursor:pointer;font-size:16px}.nav{width:100%;padding:18px 24px;display:flex;justify-content:space-between;align-items:center;background:rgba(5,5,5,0.85);backdrop-filter:blur(12px);position:sticky;top:0;z-index:50;border-bottom:1px solid #222;box-sizing:border-box}.ava{width:52px;height:52px;border-radius:50%;margin-right:16px;object-fit:cover;background:#111}.ava.on{border:2px solid var(--green);animation:pulse 2s infinite}.badge{padding:6px 12px;border-radius:100px;font-size:0.75rem;font-weight:800;text-transform:uppercase}.b-on{background:rgba(16,185,129,0.15);color:var(--green)}.b-off{background:rgba(255,255,255,0.05);color:#666}.fab{position:fixed;bottom:30px;right:30px;width:60px;height:60px;background:var(--accent);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1.6rem;color:#fff;box-shadow:0 12px 30px rgba(59,130,246,0.5);z-index:99}.pagination{display:flex;justify-content:center;gap:10px;margin-top:20px}@keyframes fadeUp{from{opacity:0;transform:translateY(15px)}to{opacity:1;transform:translateY(0)}}@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(16,185,129,0.6)}70%{box-shadow:0 0 0 12px rgba(16,185,129,0)}100%{box-shadow:0 0 0 0 rgba(16,185,129,0)}}</style></head><body>"""
@@ -555,4 +557,3 @@ if __name__ == '__main__':
     c=Config()
     c.bind=[f"0.0.0.0:{os.environ.get('PORT',10000)}"]
     asyncio.run(hypercorn.asyncio.serve(app,c))
-

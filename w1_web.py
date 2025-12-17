@@ -297,10 +297,13 @@ async def telegram_login_page():
 
 @app.route('/verify-code', methods=['POST'])
 async def verify_code():
+    # ✅ FIX: Grab form using await first
+    f = await request.form
+    code = f['code']
     tg = get_client()
     try:
         if not tg.is_connected(): await tg.connect()
-        await tg.sign_in(phone=cfg['phone'], code=request.form['code'])
+        await tg.sign_in(phone=cfg['phone'], code=code)
         return redirect('/')
     except Exception as e: return f"Invalid Code: {e} <a href='/telegram-login'>Try Again</a>"
 
@@ -377,7 +380,6 @@ async def update_profile():
 @app.route('/logout')
 async def logout(): session.clear(); return redirect('/login')
 
-# ===================== ERROR FIX =====================
 @app.before_request
 async def guard():
     if request.path.startswith('/static') or request.path in ('/setup','/do_setup','/login','/do_login','/reset','/do_reset'): return
@@ -386,17 +388,13 @@ async def guard():
     if request.path in ('/enter-phone','/send-code','/telegram-login','/verify-code'): return
     
     tg = get_client()
-    
-    # ✅ FIX: Handle connection before auth check
     if tg:
         try:
             if not tg.is_connected():
                 await tg.connect()
-            
             if not await tg.is_user_authorized():
                 return redirect('/enter-phone')
         except Exception:
-            # If connection fails completely, redirect to auth to retry
             return redirect('/enter-phone')
     else:
         return redirect('/setup')

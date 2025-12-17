@@ -5,15 +5,15 @@ import aiosqlite
 import python_socks
 from quart import Quart, request, redirect, session, Response, render_template_string, url_for
 from telethon import TelegramClient
+from telethon.sessions import StringSession #
 from telethon.tl.types import UserStatusOnline, InputPhoneContact
 from telethon.tl.functions.contacts import ImportContactsRequest
 
-# ===================== PATHS (RENDER SAFE) =====================
-BASE_DIR = "/opt/data" if os.path.exists("/opt/data") else "."
-DB_FILE = f"{BASE_DIR}/tracker.db"
-CONFIG_FILE = f"{BASE_DIR}/config.json"
-SESSION_FILE = f"{BASE_DIR}/session_pro"
-PIC_FOLDER = f"{BASE_DIR}/profile_pics"
+# ===================== CONFIGURATION =====================
+BASE_DIR = "."
+DB_FILE = "tracker.db" # On Render Free, logs reset on restart. This is unavoidable without paying.
+CONFIG_FILE = "config.json"
+PIC_FOLDER = "static/profile_pics"
 os.makedirs(PIC_FOLDER, exist_ok=True)
 
 # ===================== DEFAULT CONFIG =====================
@@ -29,7 +29,6 @@ DEFAULT_CONFIG = {
     "is_setup_done": False
 }
 
-# ===================== CONFIG LOAD/SAVE =====================
 def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
@@ -46,7 +45,7 @@ def save_config(new_config):
 
 cfg = load_config()
 
-# ===================== TELEGRAM CLIENT =====================
+# ===================== TELEGRAM CLIENT (SMART LOGIN) =====================
 client = None
 
 def get_client():
@@ -54,12 +53,27 @@ def get_client():
     if client is None:
         if not cfg["api_id"] or not cfg["api_hash"]:
             return None
-        client = TelegramClient(
-            SESSION_FILE,
-            cfg["api_id"],
-            cfg["api_hash"],
-            proxy=(python_socks.HTTP, "127.0.0.1", 8080, True) if False else None
-        )
+        
+        # 1. CHECK FOR RENDER PERMANENT STRING
+        session_string = os.environ.get("SESSION_STRING")
+        
+        if session_string:
+            print("✅ USING PERMANENT STRING SESSION (Render Safe)")
+            client = TelegramClient(
+                StringSession(session_string),
+                cfg["api_id"],
+                cfg["api_hash"],
+                proxy=(python_socks.HTTP, "127.0.0.1", 8080, True) if False else None
+            )
+        else:
+            # 2. FALLBACK TO FILE (For Termux)
+            print("⚠️ USING LOCAL FILE SESSION (Not Render Safe)")
+            client = TelegramClient(
+                "session_pro",
+                cfg["api_id"],
+                cfg["api_hash"],
+                proxy=(python_socks.HTTP, "127.0.0.1", 8080, True) if False else None
+            )
     return client
 
 # ===================== QUART APP =====================
@@ -108,7 +122,6 @@ async def download_pic(user_entity, tg):
         path = await tg.download_profile_photo(user_entity, file=PIC_FOLDER)
         if path:
             filename = os.path.basename(path)
-            # Update DB with new pic
             async with aiosqlite.connect(DB_FILE) as db:
                 await db.execute('UPDATE targets SET pic_path = ? WHERE user_id = ?', (filename, user_entity.id))
                 await db.commit()
@@ -116,7 +129,7 @@ async def download_pic(user_entity, tg):
     except: pass
     return "default.png"
 
-# ===================== CORE TRACKER LOGIC (OPTIMIZED SPEED) =====================
+# ===================== TRACKER LOOP =====================
 async def tracker_loop():
     while True:
         try:
@@ -139,17 +152,14 @@ async def tracker_loop():
                     status = 'online' if isinstance(u.status, UserStatusOnline) else 'offline'
                     current_time = now_str()
 
-                    # Update "Last Seen"
                     async with aiosqlite.connect(DB_FILE) as db:
                         await db.execute('UPDATE targets SET current_status = ?, last_seen = ? WHERE user_id = ?', (status, current_time, uid))
                         await db.commit()
 
-                    # Session Logic
                     if status == 'online':
                         async with aiosqlite.connect(DB_FILE) as db:
                             async with db.execute('SELECT id FROM sessions WHERE user_id = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1', (uid,)) as c:
                                 open_session = await c.fetchone()
-                            
                             if not open_session:
                                 await db.execute('INSERT INTO sessions (user_id, status, start_time) VALUES (?, ?, ?)', (uid, 'ONLINE', current_time))
                                 await db.commit()
@@ -157,18 +167,13 @@ async def tracker_loop():
                         async with aiosqlite.connect(DB_FILE) as db:
                              await db.execute('UPDATE sessions SET end_time = ? WHERE user_id = ? AND end_time IS NULL', (current_time, uid))
                              await db.commit()
-                except Exception as e:
-                    pass
-                
-                # ⚡ FAST MODE: Only wait 0.1s between users (was 1.0s)
-                await asyncio.sleep(0.1) 
-            
-            # ⚡ FAST MODE: Only wait 1.5s before restarting loop (was 5.0s)
-            await asyncio.sleep(1.5) 
+                except: pass
+                await asyncio.sleep(0.1)
+            await asyncio.sleep(1.5)
         except:
             await asyncio.sleep(2)
 
-# ===================== UI STYLES (GLASSMORPHISM) =====================
+# ===================== UI STYLES =====================
 STYLE = """
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -178,51 +183,42 @@ STYLE = """
 :root { --bg: #0f172a; --card-bg: rgba(30, 41, 59, 0.7); --primary: #3b82f6; --text: #f1f5f9; --text-sub: #94a3b8; --border: rgba(255, 255, 255, 0.1); }
 body { background: radial-gradient(circle at top, #1e293b, #0f172a); color: var(--text); font-family: 'Inter', sans-serif; margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; }
 a { text-decoration: none; color: inherit; }
-
-/* Animations */
-@keyframes fadeIn { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
-@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(34, 197, 94, 0); } 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); } }
-
-/* Components */
-.glass-container { background: var(--card-bg); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid var(--border); border-radius: 20px; padding: 2rem; width: 90%; max-width: 420px; box-shadow: 0 20px 25px rgba(0,0,0,0.3); animation: fadeIn 0.5s; margin-top: 5vh; }
+.glass-container { background: var(--card-bg); backdrop-filter: blur(12px); border: 1px solid var(--border); border-radius: 20px; padding: 2rem; width: 90%; max-width: 420px; margin-top: 5vh; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
 .input { width: 100%; padding: 14px; margin-bottom: 12px; background: rgba(15,23,42,0.6); border: 1px solid var(--border); border-radius: 12px; color: white; box-sizing: border-box; font-size: 16px; }
-.input:focus { outline: none; border-color: var(--primary); }
 .btn { width: 100%; padding: 14px; background: var(--primary); color: white; border: none; border-radius: 12px; font-weight: 600; cursor: pointer; font-size: 16px; transition: 0.2s; }
-.btn:hover { filter: brightness(1.1); }
 .nav { width: 100%; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; background: rgba(15,23,42,0.8); backdrop-filter: blur(10px); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; box-sizing: border-box; }
-
-/* Cards */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 15px; width: 95%; max-width: 1000px; padding: 20px 0; padding-bottom: 80px; }
-.card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; padding: 16px; display: flex; align-items: center; justify-content: space-between; transition: transform 0.2s; position: relative; }
-.card:active { transform: scale(0.99); }
+.card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; padding: 16px; display: flex; align-items: center; justify-content: space-between; position: relative; }
 .avatar { width: 50px; height: 50px; border-radius: 50%; object-fit: cover; border: 2px solid #334155; margin-right: 15px; }
 .avatar.online { border-color: #22c55e; }
-.status-badge { font-size: 0.75rem; font-weight: 700; padding: 4px 10px; border-radius: 20px; text-transform: uppercase; display: flex; align-items: center; gap: 5px; }
+.status-badge { font-size: 0.75rem; font-weight: 700; padding: 4px 10px; border-radius: 20px; text-transform: uppercase; }
 .online-badge { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
 .offline-badge { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
-.dot { width: 8px; height: 8px; background: #4ade80; border-radius: 50%; animation: pulse 2s infinite; }
-
-/* FAB */
-.fab { position: fixed; bottom: 25px; right: 25px; background: var(--primary); width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-size: 24px; box-shadow: 0 10px 20px rgba(0,0,0,0.4); transition: 0.2s; }
-.fab:active { transform: scale(0.9); }
+.fab { position: fixed; bottom: 25px; right: 25px; background: var(--primary); width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-size: 24px; box-shadow: 0 10px 20px rgba(0,0,0,0.4); }
 </style>
 """
 
 # ===================== ROUTES =====================
 
-# --- AUTH & SETUP ---
 @app.route('/setup')
 async def setup():
     if cfg['is_setup_done']: return redirect('/login')
+    # If SESSION_STRING exists, we skip API Setup
+    if os.environ.get("SESSION_STRING"):
+        global cfg
+        cfg['is_setup_done'] = True
+        save_config(cfg)
+        return redirect('/login')
+
     return await render_template_string(STYLE + """
 <div class="glass-container">
     <h3 style="text-align:center">🚀 Tracker Setup</h3>
     <form action="/do_setup" method="post">
-        <label style="color:var(--text-sub); font-size:0.9rem">Telegram API</label>
+        <label>Telegram API</label>
         <input name="api_id" type="number" class="input" placeholder="App ID" required>
         <input name="api_hash" class="input" placeholder="App Hash" required>
         <hr style="border-color:var(--border); margin: 20px 0">
-        <label style="color:var(--text-sub); font-size:0.9rem">Admin Account</label>
+        <label>Admin Account</label>
         <input name="username" class="input" placeholder="Create Username" required>
         <input type="password" name="password" class="input" placeholder="Create Password" required>
         <button class="btn">Initialize System</button>
@@ -234,13 +230,7 @@ async def setup():
 async def do_setup():
     global cfg
     f = await request.form
-    cfg.update({
-        "api_id": int(f['api_id']),
-        "api_hash": f['api_hash'],
-        "admin_username": f['username'],
-        "admin_password": f['password'],
-        "is_setup_done": True
-    })
+    cfg.update({ "api_id": int(f['api_id']), "api_hash": f['api_hash'], "admin_username": f['username'], "admin_password": f['password'], "is_setup_done": True })
     save_config(cfg)
     get_client()
     return redirect('/login')
@@ -255,7 +245,6 @@ async def login():
         <input type="password" name="password" class="input" placeholder="Password" required>
         <button class="btn">Access Dashboard</button>
     </form>
-    <a href="/reset" style="display:block; text-align:center; margin-top:20px; color:#ef4444; font-size:0.8rem">Factory Reset</a>
 </div>
 """)
 
@@ -267,15 +256,17 @@ async def do_login():
         return redirect('/')
     return redirect('/login')
 
-# --- TELEGRAM CONNECT FLOW ---
 @app.route('/enter-phone')
 async def enter_phone():
+    # If using SESSION_STRING, we SKIP phone entry entirely!
+    if os.environ.get("SESSION_STRING"):
+        return redirect('/')
+    
     return await render_template_string(STYLE + """
 <div class="glass-container">
     <h3 style="text-align:center">📱 Connect Telegram</h3>
-    <p style="text-align:center; color:var(--text-sub)">Enter your phone number to start.</p>
     <form action="/send-code" method="post">
-        <input name="phone" class="input" placeholder="+919876543210" required>
+        <input name="phone" class="input" placeholder="+91..." required>
         <button class="btn">Send OTP</button>
     </form>
 </div>
@@ -285,28 +276,22 @@ async def enter_phone():
 async def send_code():
     global cfg
     f = await request.form
-    phone = f['phone'].strip()
-    cfg['phone'] = phone
+    cfg['phone'] = f['phone'].strip()
     save_config(cfg)
-    
     tg = get_client()
-    if not tg: return "Error: Client not initialized. Reset app."
-    
     try:
         if not tg.is_connected(): await tg.connect()
-        await tg.send_code_request(phone)
+        await tg.send_code_request(cfg['phone'])
         return redirect('/telegram-login')
-    except Exception as e:
-        return f"Error: {e} <a href='/enter-phone'>Try Again</a>"
+    except Exception as e: return f"Error: {e} <a href='/enter-phone'>Try Again</a>"
 
 @app.route('/telegram-login')
 async def telegram_login_page():
-    return await render_template_string(STYLE + f"""
+    return await render_template_string(STYLE + """
 <div class="glass-container">
     <h3 style="text-align:center">💬 Verify OTP</h3>
-    <p style="text-align:center; color:var(--text-sub)">Code sent to {cfg.get('phone')}</p>
     <form action="/verify-code" method="post">
-        <input name="code" type="number" class="input" placeholder="12345" required>
+        <input name="code" type="number" class="input" placeholder="Code" required>
         <button class="btn">Start Tracking</button>
     </form>
 </div>
@@ -314,262 +299,99 @@ async def telegram_login_page():
 
 @app.route('/verify-code', methods=['POST'])
 async def verify_code():
-    f = await request.form
-    code = f['code']
     tg = get_client()
     try:
         if not tg.is_connected(): await tg.connect()
-        await tg.sign_in(phone=cfg['phone'], code=code)
+        await tg.sign_in(phone=cfg['phone'], code=request.form['code'])
         return redirect('/')
-    except Exception as e:
-        return f"Invalid Code: {e} <a href='/telegram-login'>Try Again</a>"
+    except Exception as e: return f"Invalid Code: {e} <a href='/telegram-login'>Try Again</a>"
 
-# --- DASHBOARD & FEATURES ---
 @app.route('/')
 async def home():
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute('SELECT * FROM targets') as c: rows = await c.fetchall()
-    
     cards = ""
     for r in rows:
-        status_cls = "online-badge" if r['current_status'] == 'online' else "offline-badge"
-        dot = "<div class='dot'></div>" if r['current_status'] == 'online' else ""
         pic = f"/static/profile_pics/{r['pic_path']}" if r['pic_path'] else "https://ui-avatars.com/api/?name="+r['display_name']
-        
-        cards += f"""
-        <a href="/target/{r['user_id']}">
-            <div class="card">
-                <div style="display:flex; align-items:center">
-                    <img src="{pic}" class="avatar {'online' if r['current_status'] == 'online' else ''}">
-                    <div>
-                        <div style="font-weight:600; font-size:1rem">{r['display_name']}</div>
-                        <div style="font-size:0.8rem; color:var(--text-sub)">{r['last_seen']}</div>
-                    </div>
-                </div>
-                <div class="status-badge {status_cls}">{dot} {r['current_status']}</div>
-            </div>
-        </a>
-        """
-        
-    return await render_template_string(STYLE + f"""
-<div class="nav">
-    <div style="font-weight:700; font-size:1.2rem"><i class="fas fa-radar"></i> ProTracker</div>
-    <a href="/profile" style="color:var(--text-sub)"><i class="fas fa-cog" style="font-size:1.2rem"></i></a>
-</div>
-
-<div class="grid">
-    {cards if cards else "<div style='text-align:center; color:var(--text-sub); grid-column:1/-1; padding:20px'>No targets active. Tap + to add one.</div>"}
-</div>
-
-<a href="/add" class="fab"><i class="fas fa-plus"></i></a>
-""")
+        cards += f"""<a href="/target/{r['user_id']}"><div class="card"><div style="display:flex; align-items:center"><img src="{pic}" class="avatar {'online' if r['current_status']=='online' else ''}"><div><div style="font-weight:600">{r['display_name']}</div><div style="font-size:0.8rem; color:var(--text-sub)">{r['last_seen']}</div></div></div><div class="status-badge {'online-badge' if r['current_status']=='online' else 'offline-badge'}">{r['current_status']}</div></div></a>"""
+    return await render_template_string(STYLE + f"""<div class="nav"><div style="font-weight:700; font-size:1.2rem"><i class="fas fa-radar"></i> ProTracker</div><a href="/profile"><i class="fas fa-cog"></i></a></div><div class="grid">{cards if cards else "<div style='color:var(--text-sub); grid-column:1/-1; text-align:center'>No targets.</div>"}</div><a href="/add" class="fab"><i class="fas fa-plus"></i></a>""")
 
 @app.route('/target/<int:uid>')
 async def target_detail(uid):
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute('SELECT * FROM targets WHERE user_id = ?', (uid,)) as c: target = await c.fetchone()
-    
     if not target: return redirect('/')
-    
     chart_data = await get_hourly_data(uid)
     insight = await get_ai_insight(uid)
     pic = f"/static/profile_pics/{target['pic_path']}" if target['pic_path'] else "https://ui-avatars.com/api/?name="+target['display_name']
-
-    return await render_template_string(STYLE + f"""
-<div class="nav">
-    <a href="/"><i class="fas fa-arrow-left"></i></a>
-    <div style="font-weight:600">{target['display_name']}</div>
-    <a href="/delete/{uid}" onclick="return confirm('Stop tracking?')" style="color:#ef4444"><i class="fas fa-trash"></i></a>
-</div>
-
-<div class="grid" style="margin-top:0">
-    <div style="grid-column: 1/-1; display:flex; flex-direction:column; align-items:center; padding:20px 0">
-        <img src="{pic}" style="width:100px; height:100px; border-radius:50%; border:4px solid var(--card-bg); margin-bottom:10px">
-        <div style="font-size:1.2rem; font-weight:700">{target['display_name']}</div>
-        <div style="color:var(--text-sub)">@{target['username']}</div>
-        <div class="status-badge {'online-badge' if target['current_status']=='online' else 'offline-badge'}" style="margin-top:10px">
-            {target['current_status'].upper()}
-        </div>
-    </div>
-
-    <div class="card" style="flex-direction:column; align-items:flex-start">
-        <div style="font-weight:600; margin-bottom:10px"><i class="fas fa-robot"></i> AI Insight</div>
-        <div style="color:var(--primary); font-size:0.9rem">{insight}</div>
-    </div>
-
-    <div class="card" style="grid-column: 1/-1; height:250px; display:block">
-        <div style="font-weight:600; margin-bottom:10px">Activity Chart</div>
-        <canvas id="chart"></canvas>
-    </div>
-    
-    <a href="/export/{uid}" class="btn" style="text-align:center; display:block"><i class="fas fa-download"></i> Download Logs (CSV)</a>
-</div>
-
-<script>
-new Chart(document.getElementById('chart'), {{
-    type: 'bar',
-    data: {{
-        labels: Array.from({{length:24}},(_,i)=>i+':00'),
-        datasets: [{{ label: 'Sessions', data: {chart_data}, backgroundColor: '#3b82f6', borderRadius: 4 }}]
-    }},
-    options: {{ responsive: true, maintainAspectRatio: false, scales: {{ x: {{ display: false }}, y: {{ beginAtZero: true, grid: {{ color: '#334155' }} }} }} }}
-}});
-</script>
-""")
+    return await render_template_string(STYLE + f"""<div class="nav"><a href="/"><i class="fas fa-arrow-left"></i></a> <b>{target['display_name']}</b> <a href="/delete/{uid}" style="color:#ef4444"><i class="fas fa-trash"></i></a></div><div class="grid"><div style="grid-column:1/-1; text-align:center"><img src="{pic}" style="width:100px; height:100px; border-radius:50%; margin-bottom:10px"><h2>{target['display_name']}</h2><div class="status-badge {'online-badge' if target['current_status']=='online' else 'offline-badge'}" style="display:inline-block">{target['current_status'].upper()}</div></div><div class="card" style="display:block"><b>AI Insight</b><br><span style="color:var(--primary)">{insight}</span></div><div class="card" style="display:block; height:250px"><canvas id="chart"></canvas></div><a href="/export/{uid}" class="btn" style="text-align:center; display:block">Download CSV</a></div><script>new Chart(document.getElementById('chart'), {{ type: 'bar', data: {{ labels: Array.from({{length:24}},(_,i)=>i+':00'), datasets: [{{ label: 'Sessions', data: {chart_data}, backgroundColor: '#3b82f6', borderRadius: 4 }}] }}, options: {{ responsive: true, maintainAspectRatio: false, scales: {{ x: {{ display: false }}, y: {{ beginAtZero: true }} }} }} }});</script>""")
 
 @app.route('/add', methods=['GET', 'POST'])
 async def add():
-    if request.method == 'GET':
-        return await render_template_string(STYLE + """
-<div class="glass-container">
-    <h3>🎯 Add Target</h3>
-    <form method="post">
-        <label style="color:var(--text-sub); font-size:0.9rem">Username or Phone</label>
-        <input name="target" class="input" placeholder="@username OR +9198..." required>
-        <label style="color:var(--text-sub); font-size:0.9rem">Display Name</label>
-        <input name="name" class="input" placeholder="e.g. Boss">
-        <button class="btn">Start Tracking</button>
-    </form>
-    <a href="/" style="display:block; text-align:center; margin-top:20px; color:var(--text-sub)">Cancel</a>
-</div>
-""")
-    
-    # POST
+    if request.method == 'GET': return await render_template_string(STYLE + """<div class="glass-container"><h3>🎯 Add Target</h3><form method="post"><input name="target" class="input" placeholder="@username OR +91..." required><input name="name" class="input" placeholder="Name"><button class="btn">Track</button></form><a href="/" style="display:block; text-align:center; margin-top:20px">Cancel</a></div>""")
     f = await request.form
-    inp = f['target'].strip()
-    name = f['name'] or inp
     tg = get_client()
-    
     try:
-        if inp.startswith('+') or inp.replace(' ','').isdigit():
-            # Phone Logic
-            contact = InputPhoneContact(client_id=0, phone=inp, first_name=name, last_name="")
-            result = await tg(ImportContactsRequest([contact]))
-            if result.users:
-                e = result.users[0]
-            else:
-                return "Error: Number not on Telegram. <a href='/add'>Try Again</a>"
-        else:
-            # Username Logic
-            e = await tg.get_entity(inp)
-            
+        inp = f['target'].strip()
+        if inp.startswith('+') or inp.isdigit():
+            c = InputPhoneContact(client_id=0, phone=inp, first_name=f['name'] or inp, last_name="")
+            r = await tg(ImportContactsRequest([c]))
+            e = r.users[0] if r.users else None
+        else: e = await tg.get_entity(inp)
+        if not e: return "User not found"
         pic = await download_pic(e, tg)
-        
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('INSERT OR IGNORE INTO targets (user_id, username, display_name, current_status, last_seen, pic_path) VALUES (?, ?, ?, ?, ?, ?)', 
-                             (e.id, getattr(e,'username',''), name, 'CHECKING...', 'Just Now', pic))
-            await db.commit()
+        async with aiosqlite.connect(DB_FILE) as db: await db.execute('INSERT OR IGNORE INTO targets (user_id, username, display_name, current_status, last_seen, pic_path) VALUES (?, ?, ?, ?, ?, ?)', (e.id, getattr(e,'username',''), f['name'] or inp, 'CHECKING...', 'Just Now', pic)); await db.commit()
         return redirect('/')
-    except Exception as e:
-        return f"Error: {e} <a href='/add'>Back</a>"
+    except Exception as e: return f"Error: {e} <a href='/add'>Back</a>"
 
 @app.route('/delete/<int:uid>')
 async def delete(uid):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('DELETE FROM targets WHERE user_id = ?', (uid,))
-        await db.commit()
+    async with aiosqlite.connect(DB_FILE) as db: await db.execute('DELETE FROM targets WHERE user_id = ?', (uid,)); await db.commit()
     return redirect('/')
 
 @app.route('/export/<int:uid>')
 async def export(uid):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT * FROM sessions WHERE user_id = ? ORDER BY id DESC', (uid,)) as c:
-            rows = await c.fetchall()
-    
-    si = io.StringIO()
-    cw = csv.writer(si)
-    cw.writerow(['ID', 'User ID', 'Status', 'Start', 'End', 'Duration'])
-    cw.writerows(rows)
+    async with aiosqlite.connect(DB_FILE) as db: 
+        async with db.execute('SELECT * FROM sessions WHERE user_id = ? ORDER BY id DESC', (uid,)) as c: rows = await c.fetchall()
+    si = io.StringIO(); cw = csv.writer(si); cw.writerow(['ID','User ID','Status','Start','End','Duration']); cw.writerows(rows)
     return Response(si.getvalue(), mimetype='text/csv', headers={"Content-Disposition": f"attachment; filename=logs_{uid}.csv"})
 
 @app.route('/reset')
-async def reset():
-    return await render_template_string(STYLE + """
-<div class="glass-container">
-    <h3>⚠️ Factory Reset</h3>
-    <p>This will wipe all settings.</p>
-    <form action="/do_reset" method="post">
-        <button class="btn" style="background:#ef4444">Confirm Reset</button>
-    </form>
-    <a href="/login" style="display:block; text-align:center; margin-top:20px">Cancel</a>
-</div>
-""")
+async def reset(): return await render_template_string(STYLE + """<div class="glass-container"><h3>⚠️ Factory Reset</h3><form action="/do_reset" method="post"><button class="btn" style="background:#ef4444">Confirm Reset</button></form><a href="/login" style="display:block; text-align:center; margin-top:20px">Cancel</a></div>""")
 
 @app.route('/do_reset', methods=['POST'])
 async def do_reset():
     if os.path.exists(CONFIG_FILE): os.remove(CONFIG_FILE)
-    if os.path.exists(SESSION_FILE + '.session'): os.remove(SESSION_FILE + '.session')
-    global cfg
-    cfg = DEFAULT_CONFIG.copy()
+    if os.path.exists("session_pro.session"): os.remove("session_pro.session")
+    global cfg; cfg = DEFAULT_CONFIG.copy()
     os.execv(sys.executable, ['python'] + sys.argv)
 
 @app.route('/profile')
-async def profile():
-    return await render_template_string(STYLE + f"""
-<div class="nav"><a href="/"><i class="fas fa-arrow-left"></i></a> <b>Settings</b> <div></div></div>
-<div class="glass-container">
-    <div style="word-break:break-all; background:rgba(34,197,94,0.1); padding:10px; border-radius:8px; border:1px solid #22c55e; color:#4ade80; margin-bottom:20px">
-        <b>Recovery Key:</b><br>{cfg['recovery_key']}
-    </div>
-    <form action="/update_profile" method="post">
-        <label>Update API ID</label>
-        <input name="api_id" class="input" value="{cfg['api_id']}">
-        <label>Update Username</label>
-        <input name="username" class="input" value="{cfg['admin_username']}">
-        <button class="btn">Save & Restart</button>
-    </form>
-    <a href="/logout" style="display:block; text-align:center; margin-top:20px; color:#ef4444">Logout</a>
-</div>
-""")
+async def profile(): return await render_template_string(STYLE + f"""<div class="nav"><a href="/"><i class="fas fa-arrow-left"></i></a> <b>Settings</b> <div></div></div><div class="glass-container"><div style="padding:10px; background:#22c55e20; color:#4ade80; border-radius:8px; margin-bottom:10px">Key: {cfg['recovery_key']}</div><form action="/update_profile" method="post"><input name="username" class="input" value="{cfg['admin_username']}"><button class="btn">Save</button></form><a href="/logout" style="color:#ef4444; display:block; text-align:center; margin-top:20px">Logout</a></div>""")
 
 @app.route('/update_profile', methods=['POST'])
 async def update_profile():
-    f = await request.form
-    global cfg
-    cfg['api_id'] = int(f['api_id'])
-    cfg['admin_username'] = f['username']
-    save_config(cfg)
+    global cfg; cfg['admin_username'] = request.form['username']; save_config(cfg)
     os.execv(sys.executable, ['python'] + sys.argv)
 
 @app.route('/logout')
-async def logout():
-    session.clear()
-    return redirect('/login')
+async def logout(): session.clear(); return redirect('/login')
 
-# --- MIDDLEWARE ---
 @app.before_request
 async def guard():
-    if request.path.startswith('/static'): return
-    if request.path in ('/setup', '/do_setup', '/login', '/do_login', '/reset', '/do_reset'): return
-    
-    if not cfg['is_setup_done']: return redirect('/setup')
+    if request.path.startswith('/static') or request.path in ('/setup','/do_setup','/login','/do_login','/reset','/do_reset'): return
+    if not cfg['is_setup_done'] and not os.environ.get("SESSION_STRING"): return redirect('/setup')
     if 'user' not in session: return redirect('/login')
-    
-    if request.path in ('/enter-phone', '/send-code', '/telegram-login', '/verify-code'): return
-    
-    # Check TG Connection for Dashboard
+    if request.path in ('/enter-phone','/send-code','/telegram-login','/verify-code'): return
     tg = get_client()
-    if not tg: return redirect('/setup')
-    
-    if not tg.is_connected():
-        try: await tg.connect()
-        except: pass
-        
-    if not await tg.is_user_authorized():
-        return redirect('/enter-phone')
+    if not tg or not await tg.is_user_authorized(): return redirect('/enter-phone')
 
 @app.before_serving
-async def start():
-    print(f"KEY: {cfg['recovery_key']}")
-    await init_db()
-    app.add_background_task(tracker_loop)
+async def start(): await init_db(); app.add_background_task(tracker_loop)
 
 if __name__ == '__main__':
     from hypercorn.config import Config
     import hypercorn.asyncio
-    c = Config()
-    c.bind = [f"0.0.0.0:{os.environ.get('PORT', 10000)}"]
-    asyncio.run(hypercorn.asyncio.serve(app, c))
-
+    c = Config(); c.bind = [f"0.0.0.0:{os.environ.get('PORT', 10000)}"]; asyncio.run(hypercorn.asyncio.serve(app, c))

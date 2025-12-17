@@ -1,16 +1,4 @@
-import os
-import sys
-import json
-import asyncio
-import logging
-import io
-import csv
-import secrets
-import hashlib
-import random
-import time
-import statistics
-import glob
+import os, sys, json, asyncio, logging, io, csv, secrets, hashlib, random, time, statistics, glob
 from datetime import datetime, timedelta
 import pytz
 import aiosqlite
@@ -29,6 +17,7 @@ CONFIG_FILE = "config.json"
 PIC_FOLDER = "static/profile_pics"
 os.makedirs(PIC_FOLDER, exist_ok=True)
 
+# 🛡️ Production Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("Diamond")
 
@@ -79,14 +68,10 @@ def load_config():
         try:
             with open(CONFIG_FILE, 'r') as f:
                 saved = json.load(f)
-                for k, v in DEFAULT_CONFIG.items():
-                    saved.setdefault(k, v)
+                for k, v in DEFAULT_CONFIG.items(): saved.setdefault(k, v)
                 cfg = saved
-        except:
-            cfg = DEFAULT_CONFIG.copy()
-    else:
-        cfg = DEFAULT_CONFIG.copy()
-        save_config()
+        except: cfg = DEFAULT_CONFIG.copy()
+    else: cfg = DEFAULT_CONFIG.copy(); save_config()
 
 def save_config():
     try:
@@ -95,23 +80,14 @@ def save_config():
     except:
         pass
 
-def hash_pwd(p):
-    return hashlib.sha256((p + cfg['secret_key']).encode()).hexdigest()
-
-def now_iso():
-    return datetime.now(pytz.timezone(cfg['timezone'])).isoformat()
-
+def hash_pwd(p): return hashlib.sha256((p + cfg['secret_key']).encode()).hexdigest()
+def now_iso(): return datetime.now(pytz.timezone(cfg['timezone'])).isoformat()
 def fmt_time(iso): 
-    try:
-        return datetime.fromisoformat(iso).strftime('%I:%M %p') if iso else "—"
-    except:
-        return "—"
-
+    try: return datetime.fromisoformat(iso).strftime('%I:%M %p') if iso else "—"
+    except: return "—"
 def fmt_full(iso):
-    try:
-        return datetime.fromisoformat(iso).strftime('%d-%b %I:%M %p') if iso else "—"
-    except:
-        return "—"
+    try: return datetime.fromisoformat(iso).strftime('%d-%b %I:%M %p') if iso else "—"
+    except: return "—"
 
 load_config()
 
@@ -120,52 +96,40 @@ tracker_client = None
 auth_client = None
 
 def get_proxy():
-    if not cfg.get('proxy_enabled'):
-        return None
+    if not cfg.get('proxy_enabled'): return None
     ptype = python_socks.SOCKS5 if cfg['proxy_type'] == 'socks5' else python_socks.HTTP
     return (ptype, cfg['proxy_addr'], int(cfg['proxy_port']), True, cfg['proxy_user'], cfg['proxy_pass'])
 
 def create_client(session_obj):
-    if not cfg.get("api_id") or not cfg.get("api_hash"):
-        raise ValueError("API Configuration Missing")
+    if not cfg.get("api_id") or not cfg.get("api_hash"): raise ValueError("API Config Missing")
     try:
         return TelegramClient(session_obj, cfg["api_id"], cfg["api_hash"], proxy=get_proxy())
-    except:
-        return None
+    except: return None
 
 async def get_auth_client():
     global auth_client
-    if auth_client and not auth_client.is_connected():
-        await auth_client.disconnect()
-        auth_client = None
+    if auth_client and not auth_client.is_connected(): await auth_client.disconnect(); auth_client = None
     if auth_client is None:
         try:
             auth_client = create_client("session_pro")
-            if auth_client:
-                await auth_client.connect()
-        except Exception as e:
-            logger.error(f"Auth Client Init Failed: {e}")
-            return None
+            if auth_client: await auth_client.connect()
+        except Exception as e: logger.error(f"Auth Client Init Failed: {e}"); return None
     return auth_client
 
 async def reset_clients():
     global tracker_client, auth_client
     for c in [tracker_client, auth_client]:
         if c: 
-            try:
-                await c.disconnect()
-            except:
-                pass
-    tracker_client = None
-    auth_client = None
+            try: await c.disconnect()
+            except: pass
+    tracker_client = None; auth_client = None
 
 async def download_pic(user_entity, tg):
     try:
         fname = f"{user_entity.id}_{secrets.token_hex(4)}.jpg"
         path = await tg.download_profile_photo(user_entity, file=os.path.join(PIC_FOLDER, fname))
         return fname if path else None
-    except:
-        return None
+    except: return None
 
 # ===================== 🚀 APP & DB =====================
 app = Quart(__name__)
@@ -181,8 +145,7 @@ async def get_db():
 @app.teardown_appcontext
 async def close_connection(exception):
     db = getattr(g, '_database', None)
-    if db is not None:
-        await db.close()
+    if db is not None: await db.close()
 
 async def init_db():
     async with aiosqlite.connect(DB_FILE) as db:
@@ -208,8 +171,7 @@ def calc_duration(start, end):
     try:
         diff = datetime.fromisoformat(end) - datetime.fromisoformat(start)
         return str(timedelta(seconds=int(diff.total_seconds())))
-    except:
-        return "0s"
+    except: return "0s"
 
 async def get_heatmap(user_id):
     hourly = [0]*24
@@ -218,20 +180,17 @@ async def get_heatmap(user_id):
         sessions = await c.fetchall()
     for s, e in sessions:
         try:
-            cur = datetime.fromisoformat(s)
-            end = datetime.fromisoformat(e)
+            cur = datetime.fromisoformat(s); end = datetime.fromisoformat(e)
             while cur < end:
                 hourly[cur.hour] += 1
                 cur += timedelta(minutes=60)
-        except:
-            pass
+        except: pass
     return [min(x*5, 60) for x in hourly]
 
 # ===================== 🕵️ DIAMOND TRACKER ENGINE =====================
 async def process_batch(tg, batch):
     tasks = []
-    for uid in batch:
-        tasks.append(tg.get_entity(uid))
+    for uid in batch: tasks.append(tg.get_entity(uid))
     return await asyncio.gather(*tasks, return_exceptions=True)
 
 async def apply_updates_bulk(db, updates, batch_ids, ts):
@@ -241,16 +200,14 @@ async def apply_updates_bulk(db, updates, batch_ids, ts):
     for i, res in enumerate(updates):
         uid = batch_ids[i]
         if isinstance(res, Exception):
-            if isinstance(res, FloodWaitError):
-                logger.warning(f"🌊 FloodWait {uid}: {res.seconds}s")
+            if isinstance(res, FloodWaitError): logger.warning(f"🌊 FloodWait {uid}: {res.seconds}s")
             continue
         
         status = 'online' if isinstance(res.status, UserStatusOnline) else 'offline'
         valid_updates.append((uid, status))
         uids_to_check.append(uid)
 
-    if not uids_to_check:
-        return
+    if not uids_to_check: return
 
     placeholder = ','.join('?' for _ in uids_to_check)
     async with db.execute(f'SELECT user_id, id, start_time FROM sessions WHERE end_time IS NULL AND user_id IN ({placeholder})', uids_to_check) as c:
@@ -264,10 +221,8 @@ async def apply_updates_bulk(db, updates, batch_ids, ts):
     new_events = []
 
     for uid, status in valid_updates:
-        if status == 'offline':
-            target_updates.append((status, ts, uid))
-        else:
-            target_updates.append((status, None, uid))
+        if status == 'offline': target_updates.append((status, ts, uid))
+        else: target_updates.append((status, None, uid))
 
         is_active = uid in active_sessions
         
@@ -282,17 +237,12 @@ async def apply_updates_bulk(db, updates, batch_ids, ts):
     if target_updates: 
         off_list = [x for x in target_updates if x[0] == 'offline']
         on_list = [(x[0], x[2]) for x in target_updates if x[0] == 'online']
-        if off_list:
-            await db.executemany('UPDATE targets SET current_status=?, last_seen=? WHERE user_id=?', off_list)
-        if on_list:
-            await db.executemany('UPDATE targets SET current_status=? WHERE user_id=?', on_list)
+        if off_list: await db.executemany('UPDATE targets SET current_status=?, last_seen=? WHERE user_id=?', off_list)
+        if on_list: await db.executemany('UPDATE targets SET current_status=? WHERE user_id=?', on_list)
 
-    if new_sessions:
-        await db.executemany('INSERT INTO sessions (user_id, status, start_time) VALUES (?,?,?)', new_sessions)
-    if close_sessions:
-        await db.executemany('UPDATE sessions SET end_time=?, duration=? WHERE id=?', close_sessions)
-    if new_events:
-        await db.executemany('INSERT INTO status_events (user_id, status, timestamp) VALUES (?,?,?)', new_events)
+    if new_sessions: await db.executemany('INSERT INTO sessions (user_id, status, start_time) VALUES (?,?,?)', new_sessions)
+    if close_sessions: await db.executemany('UPDATE sessions SET end_time=?, duration=? WHERE id=?', close_sessions)
+    if new_events: await db.executemany('INSERT INTO status_events (user_id, status, timestamp) VALUES (?,?,?)', new_events)
 
 async def maintenance(db):
     try:
@@ -301,8 +251,7 @@ async def maintenance(db):
         await db.execute("DELETE FROM status_events WHERE timestamp < ?", (cutoff,))
         await db.execute("VACUUM")
         await db.commit()
-    except:
-        pass
+    except: pass
 
 async def tracker_loop():
     global tracker_client
@@ -311,26 +260,27 @@ async def tracker_loop():
     last_maint = time.time()
     
     while True:
-        # ✅ FIXED STRUCTURE: TRY/EXCEPT INSIDE THE LOOP
         try:
+            # 1. Client Init
             if not tracker_client:
                 s_str = os.environ.get("SESSION_STRING") or cfg.get("session_string")
                 if s_str: 
                     try:
                         tracker_client = create_client(StringSession(s_str))
-                        if tracker_client:
-                            await tracker_client.connect()
-                    except Exception as e:
-                        logger.error(f"Tracker Connect Fail: {e}")
+                        if tracker_client: await tracker_client.connect()
+                    except Exception as e: logger.error(f"Tracker Connect Fail: {e}")
             
+            # 2. Authorization Check
             if not tracker_client or not await tracker_client.is_user_authorized():
                 await asyncio.sleep(10)
                 continue
 
+            # 3. Maintenance
             if time.time() - last_maint > 3600:
                 await maintenance(db)
                 last_maint = time.time()
 
+            # 4. Fetch Targets
             async with db.execute('SELECT user_id FROM targets') as cursor:
                 all_targets = [row[0] for row in await cursor.fetchall()]
 
@@ -338,6 +288,7 @@ async def tracker_loop():
                 await asyncio.sleep(5)
                 continue
 
+            # 5. Batch Processing
             chunk = cfg['batch_size']
             ts = now_iso()
             
@@ -350,15 +301,14 @@ async def tracker_loop():
                     await db.commit()
                 except Exception as e:
                     logger.debug(f"Batch Err: {e}")
+                
                 await asyncio.sleep(1)
 
             await asyncio.sleep(5)
             
-    except Exception as e:
-        logger.error(f"Fatal Loop Crash: {e}")
-        await asyncio.sleep(5)
-    finally:
-        await db.close()
+        except Exception as e:
+            logger.error(f"Fatal Loop Crash: {e}")
+            await asyncio.sleep(5)
 
 # ===================== 🎨 UI =====================
 STYLE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Diamond Tracker</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet"><style>:root{--bg:#050505;--card:rgba(22,22,22,0.7);--border:rgba(255,255,255,0.08);--accent:#3b82f6;--text:#e5e5e5;--green:#10b981;--red:#ef4444;--glass:blur(16px)}body{margin:0;font-family:'Inter',sans-serif;background:radial-gradient(circle at 50% 0,#1f1f1f,#000);color:var(--text);min-height:100vh;display:flex;flex-direction:column;align-items:center}.container{width:92%;max-width:480px;margin:20px auto 80px}.card{background:var(--card);backdrop-filter:var(--glass);border:1px solid var(--border);border-radius:24px;padding:24px;box-shadow:0 20px 40px -10px rgba(0,0,0,0.6);margin-bottom:16px;animation:fadeUp 0.4s ease-out}.input{width:100%;padding:16px;background:#0a0a0a;border:1px solid #333;border-radius:14px;color:#fff;outline:0;box-sizing:border-box;font-size:16px}.input:focus{border-color:var(--accent)}.btn{width:100%;padding:16px;background:var(--accent);color:#fff;border:0;border-radius:14px;font-weight:700;cursor:pointer;font-size:16px}.nav{width:100%;padding:18px 24px;display:flex;justify-content:space-between;align-items:center;background:rgba(5,5,5,0.85);backdrop-filter:blur(12px);position:sticky;top:0;z-index:50;border-bottom:1px solid #222;box-sizing:border-box}.ava{width:52px;height:52px;border-radius:50%;margin-right:16px;object-fit:cover;background:#111}.ava.on{border:2px solid var(--green);animation:pulse 2s infinite}.badge{padding:6px 12px;border-radius:100px;font-size:0.75rem;font-weight:800;text-transform:uppercase}.b-on{background:rgba(16,185,129,0.15);color:var(--green)}.b-off{background:rgba(255,255,255,0.05);color:#666}.fab{position:fixed;bottom:30px;right:30px;width:60px;height:60px;background:var(--accent);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1.6rem;color:#fff;box-shadow:0 12px 30px rgba(59,130,246,0.5);z-index:99}.pagination{display:flex;justify-content:center;gap:10px;margin-top:20px}@keyframes fadeUp{from{opacity:0;transform:translateY(15px)}to{opacity:1;transform:translateY(0)}}@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(16,185,129,0.6)}70%{box-shadow:0 0 0 12px rgba(16,185,129,0)}100%{box-shadow:0 0 0 0 rgba(16,185,129,0)}}</style></head><body>"""

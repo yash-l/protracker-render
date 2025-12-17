@@ -64,6 +64,7 @@ async def rate_governor(batch_size=1):
 # ===================== 🔧 UTILS =====================
 def load_config():
     global cfg
+    # 1. Try to load from file (if it exists)
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r') as f:
@@ -71,7 +72,20 @@ def load_config():
                 for k, v in DEFAULT_CONFIG.items(): saved.setdefault(k, v)
                 cfg = saved
         except: cfg = DEFAULT_CONFIG.copy()
-    else: cfg = DEFAULT_CONFIG.copy(); save_config()
+    else: 
+        cfg = DEFAULT_CONFIG.copy()
+
+    # 2. OVERRIDE with Render Environment Variables (Permanent Fix)
+    # This prevents the "API Config Missing" error on restart
+    if os.environ.get("API_ID"): 
+        try: cfg["api_id"] = int(os.environ["API_ID"])
+        except: pass
+    if os.environ.get("API_HASH"): cfg["api_hash"] = os.environ["API_HASH"]
+    
+    # We also look for session string here so it persists
+    if os.environ.get("SESSION_STRING"): cfg["session_string"] = os.environ["SESSION_STRING"]
+    
+    save_config()
 
 def save_config():
     try:
@@ -101,9 +115,16 @@ def get_proxy():
     return (ptype, cfg['proxy_addr'], int(cfg['proxy_port']), True, cfg['proxy_user'], cfg['proxy_pass'])
 
 def create_client(session_obj):
-    if not cfg.get("api_id") or not cfg.get("api_hash"): raise ValueError("API Config Missing")
+    # Check both Config and Environment Variables
+    api_id = cfg.get("api_id") or os.environ.get("API_ID")
+    api_hash = cfg.get("api_hash") or os.environ.get("API_HASH")
+    
+    if not api_id or not api_hash: 
+        logger.error("API Config Missing")
+        raise ValueError("API Config Missing")
+        
     try:
-        return TelegramClient(session_obj, cfg["api_id"], cfg["api_hash"], proxy=get_proxy())
+        return TelegramClient(session_obj, int(api_id), api_hash, proxy=get_proxy())
     except: return None
 
 async def get_auth_client():
@@ -263,6 +284,7 @@ async def tracker_loop():
         try:
             # 1. Client Init
             if not tracker_client:
+                # Priority: Env Var > Config File
                 s_str = os.environ.get("SESSION_STRING") or cfg.get("session_string")
                 if s_str: 
                     try:

@@ -45,7 +45,7 @@ def save_config(new_config):
 
 cfg = load_config()
 
-# ===================== TELEGRAM CLIENT (SMART LOGIN) =====================
+# ===================== TELEGRAM CLIENT =====================
 client = None
 
 def get_client():
@@ -58,7 +58,7 @@ def get_client():
         session_string = os.environ.get("SESSION_STRING")
         
         if session_string:
-            print("✅ USING PERMANENT STRING SESSION (Render Safe)")
+            print("✅ USING PERMANENT STRING SESSION")
             try:
                 client = TelegramClient(
                     StringSession(session_string),
@@ -70,8 +70,8 @@ def get_client():
                 print(f"⚠️ Session String Error: {e}")
                 return None
         else:
-            # 2. FALLBACK TO FILE (For Termux)
-            print("⚠️ USING LOCAL FILE SESSION (Not Render Safe)")
+            # 2. FALLBACK TO FILE
+            print("⚠️ USING LOCAL FILE SESSION")
             client = TelegramClient(
                 "session_pro",
                 cfg["api_id"],
@@ -138,42 +138,41 @@ async def tracker_loop():
     while True:
         try:
             tg = get_client()
-            if not tg or not tg.is_connected() or not await tg.is_user_authorized():
-                await asyncio.sleep(2)
-                continue
-
-            async with aiosqlite.connect(DB_FILE) as db:
-                async with db.execute('SELECT user_id, display_name FROM targets') as cursor:
-                    targets = await cursor.fetchall()
-
-            if not targets:
-                await asyncio.sleep(2)
-                continue
-            
-            for (uid, name) in targets:
-                try:
-                    u = await tg.get_entity(uid)
-                    status = 'online' if isinstance(u.status, UserStatusOnline) else 'offline'
-                    current_time = now_str()
-
+            # Ensure connected before checking authorization
+            if tg:
+                if not tg.is_connected():
+                    await tg.connect()
+                
+                if await tg.is_user_authorized():
                     async with aiosqlite.connect(DB_FILE) as db:
-                        await db.execute('UPDATE targets SET current_status = ?, last_seen = ? WHERE user_id = ?', (status, current_time, uid))
-                        await db.commit()
+                        async with db.execute('SELECT user_id, display_name FROM targets') as cursor:
+                            targets = await cursor.fetchall()
 
-                    if status == 'online':
-                        async with aiosqlite.connect(DB_FILE) as db:
-                            async with db.execute('SELECT id FROM sessions WHERE user_id = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1', (uid,)) as c:
-                                open_session = await c.fetchone()
-                            if not open_session:
-                                await db.execute('INSERT INTO sessions (user_id, status, start_time) VALUES (?, ?, ?)', (uid, 'ONLINE', current_time))
-                                await db.commit()
-                    else:
-                        async with aiosqlite.connect(DB_FILE) as db:
-                             await db.execute('UPDATE sessions SET end_time = ? WHERE user_id = ? AND end_time IS NULL', (current_time, uid))
-                             await db.commit()
-                except: pass
-                await asyncio.sleep(0.1)
-            await asyncio.sleep(1.5)
+                    if targets:
+                        for (uid, name) in targets:
+                            try:
+                                u = await tg.get_entity(uid)
+                                status = 'online' if isinstance(u.status, UserStatusOnline) else 'offline'
+                                current_time = now_str()
+
+                                async with aiosqlite.connect(DB_FILE) as db:
+                                    await db.execute('UPDATE targets SET current_status = ?, last_seen = ? WHERE user_id = ?', (status, current_time, uid))
+                                    await db.commit()
+
+                                if status == 'online':
+                                    async with aiosqlite.connect(DB_FILE) as db:
+                                        async with db.execute('SELECT id FROM sessions WHERE user_id = ? AND end_time IS NULL ORDER BY id DESC LIMIT 1', (uid,)) as c:
+                                            open_session = await c.fetchone()
+                                        if not open_session:
+                                            await db.execute('INSERT INTO sessions (user_id, status, start_time) VALUES (?, ?, ?)', (uid, 'ONLINE', current_time))
+                                            await db.commit()
+                                else:
+                                    async with aiosqlite.connect(DB_FILE) as db:
+                                         await db.execute('UPDATE sessions SET end_time = ? WHERE user_id = ? AND end_time IS NULL', (current_time, uid))
+                                         await db.commit()
+                            except: pass
+                            await asyncio.sleep(0.1) # Fast user switch
+            await asyncio.sleep(1.5) # Fast loop
         except:
             await asyncio.sleep(2)
 
@@ -206,16 +205,12 @@ a { text-decoration: none; color: inherit; }
 
 @app.route('/setup')
 async def setup():
-    # ✅ FIXED: Global declaration MUST be at the top
     global cfg
-    
     if os.environ.get("SESSION_STRING"):
         cfg['is_setup_done'] = True
         save_config(cfg)
         return redirect('/login')
-
     if cfg['is_setup_done']: return redirect('/login')
-
     return await render_template_string(STYLE + """
 <div class="glass-container">
     <h3 style="text-align:center">🚀 Tracker Setup</h3>
@@ -264,10 +259,7 @@ async def do_login():
 
 @app.route('/enter-phone')
 async def enter_phone():
-    # If using SESSION_STRING, we SKIP phone entry entirely!
-    if os.environ.get("SESSION_STRING"):
-        return redirect('/')
-    
+    if os.environ.get("SESSION_STRING"): return redirect('/')
     return await render_template_string(STYLE + """
 <div class="glass-container">
     <h3 style="text-align:center">📱 Connect Telegram</h3>
@@ -385,14 +377,29 @@ async def update_profile():
 @app.route('/logout')
 async def logout(): session.clear(); return redirect('/login')
 
+# ===================== ERROR FIX =====================
 @app.before_request
 async def guard():
     if request.path.startswith('/static') or request.path in ('/setup','/do_setup','/login','/do_login','/reset','/do_reset'): return
     if not cfg['is_setup_done'] and not os.environ.get("SESSION_STRING"): return redirect('/setup')
     if 'user' not in session: return redirect('/login')
     if request.path in ('/enter-phone','/send-code','/telegram-login','/verify-code'): return
+    
     tg = get_client()
-    if not tg or not await tg.is_user_authorized(): return redirect('/enter-phone')
+    
+    # ✅ FIX: Handle connection before auth check
+    if tg:
+        try:
+            if not tg.is_connected():
+                await tg.connect()
+            
+            if not await tg.is_user_authorized():
+                return redirect('/enter-phone')
+        except Exception:
+            # If connection fails completely, redirect to auth to retry
+            return redirect('/enter-phone')
+    else:
+        return redirect('/setup')
 
 @app.before_serving
 async def start(): await init_db(); app.add_background_task(tracker_loop)

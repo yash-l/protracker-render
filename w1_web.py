@@ -71,8 +71,12 @@ def load_config():
     else: cfg = DEFAULT_CONFIG.copy(); save_config()
 
 def save_config():
-    try: with open(CONFIG_FILE, 'w') as f: json.dump(cfg, f, indent=4)
-    except: pass
+    # ✅ FIX: Expanded to multi-line to prevent SyntaxError
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(cfg, f, indent=4)
+    except:
+        pass
 
 def hash_pwd(p): return hashlib.sha256((p + cfg['secret_key']).encode()).hexdigest()
 def now_iso(): return datetime.now(pytz.timezone(cfg['timezone'])).isoformat()
@@ -186,12 +190,6 @@ async def process_batch(tg, batch):
     return await asyncio.gather(*tasks, return_exceptions=True)
 
 async def apply_updates_bulk(db, updates, batch_ids, ts):
-    """
-    💎 Diamond Optimization: 
-    1 Query to fetch state of ALL users in batch.
-    Zero N+1 queries.
-    """
-    # 1. Prepare Data
     valid_updates = []
     uids_to_check = []
     
@@ -207,26 +205,21 @@ async def apply_updates_bulk(db, updates, batch_ids, ts):
 
     if not uids_to_check: return
 
-    # 2. Bulk Fetch Active Sessions (Vectorized Read)
     placeholder = ','.join('?' for _ in uids_to_check)
     async with db.execute(f'SELECT user_id, id, start_time FROM sessions WHERE end_time IS NULL AND user_id IN ({placeholder})', uids_to_check) as c:
         active_rows = await c.fetchall()
     
-    # Map user_id -> (session_id, start_time)
     active_sessions = {row[0]: (row[1], row[2]) for row in active_rows}
 
-    # 3. Calculate Operations in Memory
     target_updates = []
     new_sessions = []
     close_sessions = []
     new_events = []
 
     for uid, status in valid_updates:
-        # Update Target Status
         if status == 'offline': target_updates.append((status, ts, uid))
-        else: target_updates.append((status, None, uid)) # Don't overwrite last_seen if online
+        else: target_updates.append((status, None, uid))
 
-        # Logic
         is_active = uid in active_sessions
         
         if status == 'online' and not is_active:
@@ -237,9 +230,7 @@ async def apply_updates_bulk(db, updates, batch_ids, ts):
             close_sessions.append((ts, calc_duration(start_t, ts), sid))
             new_events.append((uid, 'OFFLINE', ts))
 
-    # 4. Bulk Write (Vectorized Write)
     if target_updates: 
-        # Split updates because SQL logic differs slightly for online vs offline (last_seen)
         off_list = [x for x in target_updates if x[0] == 'offline']
         on_list = [(x[0], x[2]) for x in target_updates if x[0] == 'online']
         if off_list: await db.executemany('UPDATE targets SET current_status=?, last_seen=? WHERE user_id=?', off_list)
@@ -303,7 +294,7 @@ async def tracker_loop():
             
     except Exception as e:
         logger.error(f"Fatal Loop Crash: {e}")
-        await asyncio.sleep(5) # Prevent CPU spin if DB fails hard
+        await asyncio.sleep(5)
 
 # ===================== 🎨 UI =====================
 STYLE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Diamond Tracker</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet"><style>:root{--bg:#050505;--card:rgba(22,22,22,0.7);--border:rgba(255,255,255,0.08);--accent:#3b82f6;--text:#e5e5e5;--green:#10b981;--red:#ef4444;--glass:blur(16px)}body{margin:0;font-family:'Inter',sans-serif;background:radial-gradient(circle at 50% 0,#1f1f1f,#000);color:var(--text);min-height:100vh;display:flex;flex-direction:column;align-items:center}.container{width:92%;max-width:480px;margin:20px auto 80px}.card{background:var(--card);backdrop-filter:var(--glass);border:1px solid var(--border);border-radius:24px;padding:24px;box-shadow:0 20px 40px -10px rgba(0,0,0,0.6);margin-bottom:16px;animation:fadeUp 0.4s ease-out}.input{width:100%;padding:16px;background:#0a0a0a;border:1px solid #333;border-radius:14px;color:#fff;outline:0;box-sizing:border-box;font-size:16px}.input:focus{border-color:var(--accent)}.btn{width:100%;padding:16px;background:var(--accent);color:#fff;border:0;border-radius:14px;font-weight:700;cursor:pointer;font-size:16px}.nav{width:100%;padding:18px 24px;display:flex;justify-content:space-between;align-items:center;background:rgba(5,5,5,0.85);backdrop-filter:blur(12px);position:sticky;top:0;z-index:50;border-bottom:1px solid #222;box-sizing:border-box}.ava{width:52px;height:52px;border-radius:50%;margin-right:16px;object-fit:cover;background:#111}.ava.on{border:2px solid var(--green);animation:pulse 2s infinite}.badge{padding:6px 12px;border-radius:100px;font-size:0.75rem;font-weight:800;text-transform:uppercase}.b-on{background:rgba(16,185,129,0.15);color:var(--green)}.b-off{background:rgba(255,255,255,0.05);color:#666}.fab{position:fixed;bottom:30px;right:30px;width:60px;height:60px;background:var(--accent);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1.6rem;color:#fff;box-shadow:0 12px 30px rgba(59,130,246,0.5);z-index:99}.pagination{display:flex;justify-content:center;gap:10px;margin-top:20px}@keyframes fadeUp{from{opacity:0;transform:translateY(15px)}to{opacity:1;transform:translateY(0)}}@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(16,185,129,0.6)}70%{box-shadow:0 0 0 12px rgba(16,185,129,0)}100%{box-shadow:0 0 0 0 rgba(16,185,129,0)}}</style></head><body>"""
@@ -318,15 +309,13 @@ async def guard():
     tg = await get_auth_client()
     if not tg or (tg.is_connected() and not await tg.is_user_authorized()): return redirect('/connect')
 
-# CSRF Protection Hook (Simplified for single file)
+# CSRF Protection
 @app.before_request
 async def csrf_protect():
     if request.method == "POST":
         token = (await request.form).get('csrf_token')
         if not token or token != session.get('csrf_token'):
-            # Allow initial setup without token
-            if request.path not in ('/do_setup', '/do_login', '/do_reset'):
-                return "Session Expired. Refresh."
+            if request.path not in ('/do_setup', '/do_login', '/do_reset'): return "Session Expired. Refresh."
 
 def csrf():
     if 'csrf_token' not in session: session['csrf_token'] = secrets.token_hex(16)

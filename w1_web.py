@@ -5,13 +5,13 @@ import aiosqlite
 import python_socks
 from quart import Quart, request, redirect, session, Response, render_template_string, url_for
 from telethon import TelegramClient
-from telethon.sessions import StringSession #
+from telethon.sessions import StringSession
 from telethon.tl.types import UserStatusOnline, InputPhoneContact
 from telethon.tl.functions.contacts import ImportContactsRequest
 
 # ===================== CONFIGURATION =====================
 BASE_DIR = "."
-DB_FILE = "tracker.db" # On Render Free, logs reset on restart. This is unavoidable without paying.
+DB_FILE = "tracker.db" 
 CONFIG_FILE = "config.json"
 PIC_FOLDER = "static/profile_pics"
 os.makedirs(PIC_FOLDER, exist_ok=True)
@@ -59,12 +59,16 @@ def get_client():
         
         if session_string:
             print("✅ USING PERMANENT STRING SESSION (Render Safe)")
-            client = TelegramClient(
-                StringSession(session_string),
-                cfg["api_id"],
-                cfg["api_hash"],
-                proxy=(python_socks.HTTP, "127.0.0.1", 8080, True) if False else None
-            )
+            try:
+                client = TelegramClient(
+                    StringSession(session_string),
+                    cfg["api_id"],
+                    cfg["api_hash"],
+                    proxy=(python_socks.HTTP, "127.0.0.1", 8080, True) if False else None
+                )
+            except Exception as e:
+                print(f"⚠️ Session String Error: {e}")
+                return None
         else:
             # 2. FALLBACK TO FILE (For Termux)
             print("⚠️ USING LOCAL FILE SESSION (Not Render Safe)")
@@ -202,13 +206,15 @@ a { text-decoration: none; color: inherit; }
 
 @app.route('/setup')
 async def setup():
-    if cfg['is_setup_done']: return redirect('/login')
-    # If SESSION_STRING exists, we skip API Setup
+    # ✅ FIXED: Global declaration MUST be at the top
+    global cfg
+    
     if os.environ.get("SESSION_STRING"):
-        global cfg
         cfg['is_setup_done'] = True
         save_config(cfg)
         return redirect('/login')
+
+    if cfg['is_setup_done']: return redirect('/login')
 
     return await render_template_string(STYLE + """
 <div class="glass-container">

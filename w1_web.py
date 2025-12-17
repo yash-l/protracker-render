@@ -572,3 +572,4 @@ if __name__ == '__main__':
     c = Config()
     c.bind = [f"0.0.0.0:{os.environ.get('PORT', 10000)}"]
     asyncio.run(hypercorn.asyncio.serve(app, c))
+

@@ -1,7 +1,8 @@
-quart>=0.19.9
+quart
 hypercorn
 telethon
 aiosqlite
 pytz
 aiohttp
 cryptography
+

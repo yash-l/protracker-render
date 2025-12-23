@@ -1,6 +1,0 @@
-quart
-telethon
-aiosqlite
-pytz
-python-socks
-hypercorn

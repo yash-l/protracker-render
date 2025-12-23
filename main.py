@@ -19,11 +19,10 @@ from telethon.tl.types import UserStatusOnline, UserStatusRecently, UserStatusOf
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
 
-# --- CONFIGURATION ---
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-# Note: SESSION_STRING is now managed via Database/Web Login, but Env var can override
-SESSION_STRING = os.getenv("SESSION_STRING", "") 
+# --- CONFIGURATION DEFAULTS ---
+# We use global variables that can be updated via the Web UI
+DEFAULT_API_ID = os.getenv("API_ID", "")
+DEFAULT_API_HASH = os.getenv("API_HASH", "")
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123")
 SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_hex(32))
@@ -46,9 +45,11 @@ app.secret_key = SECRET_KEY
 temp_client = None
 phone_number = None
 phone_code_hash = None
-bot_client = None
+# These will store the credentials provided via Web UI
+runtime_api_id = int(DEFAULT_API_ID) if DEFAULT_API_ID.isdigit() else 0
+runtime_api_hash = DEFAULT_API_HASH
 
-# --- DATABASE SCHEMA (MERGED) ---
+# --- DATABASE SCHEMA ---
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,7 +76,6 @@ CREATE TABLE IF NOT EXISTS targets (
     pic_path TEXT
 );
 
-/* Added from Diamond Tracker for Heatmaps */
 CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     target_id INTEGER,
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS logs (
 );
 """
 
-# --- UI TEMPLATE (Matrix Rain + Glassmorphism + Charts) ---
+# --- UI TEMPLATE ---
 HTML_BASE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -154,15 +154,12 @@ HTML_BASE = """
         button { cursor: pointer; font-weight: bold; text-transform: uppercase; background: rgba(0, 243, 255, 0.1); }
         button:hover { background: var(--neon-green); color: #000; box-shadow: 0 0 15px var(--neon-green); }
 
-        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 10px; }
-        th { text-align: left; color: #888; border-bottom: 1px solid #333; padding: 8px; }
-        td { padding: 8px; border-bottom: 1px solid #222; color: #ccc; }
-
         .btn-small { width: auto; padding: 5px 15px; font-size: 0.8rem; margin: 0; display: inline-block; }
         .grid-item { display: flex; align-items: center; justify-content: space-between; padding: 15px 0; border-bottom: 1px solid #222; }
         
-        /* Chart Container */
         .chart-container { position: relative; height: 250px; width: 100%; }
+        
+        label { font-size: 0.8rem; color: #888; display: block; margin-top: 10px; }
     </style>
     <script>
         function initMatrix() {
@@ -207,7 +204,7 @@ HTML_BASE = """
 </html>
 """
 
-# --- DATABASE ENGINE (CONTEXT MANAGER) ---
+# --- DATABASE ENGINE ---
 class DbContext:
     def __init__(self): self.conn = None
     async def __aenter__(self):
@@ -222,33 +219,34 @@ async def get_db(): return DbContext()
 async def init_db():
     async with await get_db() as db:
         await db.executescript(DB_SCHEMA)
-        # Check migrations for sessions table
-        try: await db.execute("SELECT duration FROM sessions LIMIT 1")
-        except: 
-            logger.info("Migrating: Creating sessions table")
-            await db.commit() # Already handled by IF NOT EXISTS
-        
-        # Admin Create
         async with db.execute("SELECT * FROM users WHERE username = ?", (ADMIN_USER,)) as c:
             if not await c.fetchone():
                 await db.execute("INSERT INTO users (username, password, is_admin) VALUES (?, ?, 1)", (ADMIN_USER, ADMIN_PASS))
                 await db.commit()
                 print(f"\n[ADMIN] {ADMIN_USER} / {ADMIN_PASS}\n")
-
-async def get_session_string():
+    
+    # Load saved API credentials if they exist
     async with await get_db() as db:
-        async with db.execute("SELECT value FROM settings WHERE key='session_string'") as c:
+        async with db.execute("SELECT value FROM settings WHERE key='api_id'") as c:
+            r = await c.fetchone()
+            if r: global runtime_api_id; runtime_api_id = int(r['value'])
+        async with db.execute("SELECT value FROM settings WHERE key='api_hash'") as c:
+            r = await c.fetchone()
+            if r: global runtime_api_hash; runtime_api_hash = r['value']
+
+async def get_setting(key):
+    async with await get_db() as db:
+        async with db.execute("SELECT value FROM settings WHERE key=?", (key,)) as c:
             row = await c.fetchone()
             return row['value'] if row else None
 
-async def save_session_string(session_str):
+async def save_setting(key, value):
     async with await get_db() as db:
-        await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('session_string', ?)", (session_str,))
+        await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
         await db.commit()
 
 # --- HELPER FUNCTIONS ---
-def now_tz():
-    return datetime.now(TZ)
+def now_tz(): return datetime.now(TZ)
 
 def fmt_time(dt_obj):
     if not dt_obj: return "—"
@@ -268,27 +266,19 @@ def calc_duration(start, end):
     return f"{minutes}m {seconds}s"
 
 async def get_heatmap_data(target_id):
-    # Generates hourly activity data for Chart.js
     hourly = [0] * 24
     async with await get_db() as db:
         async with db.execute("SELECT start_time, end_time FROM sessions WHERE target_id=? ORDER BY id DESC LIMIT 100", (target_id,)) as c:
             rows = await c.fetchall()
-    
     for row in rows:
         try:
             s = datetime.fromisoformat(row['start_time']) if isinstance(row['start_time'], str) else row['start_time']
-            # If session is ongoing (no end_time), assume 'now'
             e = datetime.fromisoformat(row['end_time']) if row['end_time'] else now_tz()
-            
-            # Simple heuristic: Increment hour counter for start hour
             hourly[s.hour] += 1
-            # If spanned multiple hours, increment those too
             while s.hour != e.hour:
                 s += timedelta(hours=1)
                 hourly[s.hour] += 1
         except: pass
-    
-    # Cap values for chart aesthetics
     return [min(x, 10) for x in hourly]
 
 # --- TRACKER LOGIC ---
@@ -298,15 +288,18 @@ class CyberTracker:
         self.tracking_active = False
 
     async def start(self):
-        session_str = await get_session_string()
-        if not session_str and SESSION_STRING: session_str = SESSION_STRING # Fallback
-        
+        session_str = await get_setting('session_string')
+        # Ensure we have API creds loaded
+        if not runtime_api_id or not runtime_api_hash:
+            logger.warning("No API Credentials found. Please connect via Web UI.")
+            return
+
         if not session_str:
-            logger.warning("Surveillance Paused: No Session String.")
+            logger.warning("No Session String found. Please connect via Web UI.")
             return
 
         try:
-            self.client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+            self.client = TelegramClient(StringSession(session_str), runtime_api_id, runtime_api_hash)
             await self.client.connect()
             if not await self.client.is_user_authorized():
                 logger.error("Session Invalid.")
@@ -327,7 +320,7 @@ class CyberTracker:
 
                     for t in targets:
                         await self.probe_target(db, t)
-                        await asyncio.sleep(0.5) # Anti-flood delay
+                        await asyncio.sleep(0.5) 
             except Exception as e:
                 logger.error(f"Loop Exception: {e}")
             await asyncio.sleep(4)
@@ -341,7 +334,6 @@ class CyberTracker:
             if not tg_id: return
             entity = await self.client.get_entity(tg_id)
             
-            # Resolve ID if we only had username
             if isinstance(tg_id, str) and entity.id:
                 await db.execute("UPDATE targets SET tg_id=? WHERE id=?", (entity.id, t_id))
 
@@ -352,32 +344,20 @@ class CyberTracker:
 
             if curr_status != last_status:
                 now = now_tz()
-                
-                # 1. Update Target Status
                 await db.execute("UPDATE targets SET last_status=?, last_seen=? WHERE id=?", (curr_status, now, t_id))
-                
-                # 2. Log Event
                 await db.execute("INSERT INTO logs (target_id, event_type, timestamp) VALUES (?, ?, ?)", (t_id, curr_status.upper(), now))
 
-                # 3. Session Logic (Diamond Tracker Feature)
                 if curr_status == 'online':
-                    # Start new session
                     await db.execute("INSERT INTO sessions (target_id, status, start_time) VALUES (?, 'ONLINE', ?)", (t_id, now))
                 elif last_status == 'online':
-                    # Close open session
-                    # Find most recent open session for this target
                     async with db.execute("SELECT id, start_time FROM sessions WHERE target_id=? AND end_time IS NULL ORDER BY id DESC LIMIT 1", (t_id,)) as c:
                         open_sess = await c.fetchone()
-                    
                     if open_sess:
                         duration = calc_duration(open_sess['start_time'], now)
                         await db.execute("UPDATE sessions SET end_time=?, duration=?, status='FINISHED' WHERE id=?", (now, duration, open_sess['id']))
 
                 await db.commit()
-
-        except Exception as e:
-            # logger.warning(f"Probe Error {tg_id}: {e}")
-            pass
+        except: pass
 
 cyber_bot = CyberTracker()
 
@@ -460,98 +440,47 @@ async def dashboard():
     """
     return await render_template_string(HTML_BASE.replace('{{ CONTENT }}', content))
 
-# --- SECONDARY PAGE: TARGET DETAILS (MERGED FEATURE) ---
 @app.route('/target/<int:t_id>')
 @login_required
 async def target_detail(t_id):
     async with await get_db() as db:
-        # Get Info
-        async with db.execute("SELECT * FROM targets WHERE id=?", (t_id,)) as c:
-            target = await c.fetchone()
-        
-        # Get Sessions (Last 20)
-        async with db.execute("SELECT * FROM sessions WHERE target_id=? ORDER BY id DESC LIMIT 20", (t_id,)) as c:
-            sessions = await c.fetchall()
-            
+        async with db.execute("SELECT * FROM targets WHERE id=?", (t_id,)) as c: target = await c.fetchone()
+        async with db.execute("SELECT * FROM sessions WHERE target_id=? ORDER BY id DESC LIMIT 20", (t_id,)) as c: sessions = await c.fetchall()
     if not target: return "Target Not Found"
-    
-    # Heatmap Data
     heatmap_data = await get_heatmap_data(t_id)
-    
     session_rows = ""
     for s in sessions:
         dur = s['duration'] if s['duration'] else "Active"
         session_rows += f"<tr><td>{fmt_time(s['start_time'])}</td><td>{fmt_time(s['end_time'])}</td><td>{dur}</td></tr>"
 
     content = f"""
-    <div style="margin-bottom:15px;">
-        <a href="/dashboard" style="color:#888;">&larr; BACK TO GRID</a>
-    </div>
-    
+    <div style="margin-bottom:15px;"><a href="/dashboard" style="color:#888;">&larr; BACK TO GRID</a></div>
     <div class="card" style="text-align:center;">
         <h1 style="color:#fff; margin-bottom:5px;">{target['display_name']}</h1>
         <div style="color:var(--neon-blue); margin-bottom:20px;">{target['tg_username'] or target['tg_id']}</div>
-        
         <div style="display:flex; justify-content:center; gap:20px; margin-bottom:20px;">
-            <div>
-                <div style="font-size:0.8rem; color:#888;">STATUS</div>
-                <div style="font-size:1.2rem;" class="{ 'online' if target['last_status']=='online' else 'offline' }">{target['last_status'].upper()}</div>
-            </div>
-            <div>
-                <div style="font-size:0.8rem; color:#888;">LAST SEEN</div>
-                <div style="font-size:1.2rem; color:#fff;">{fmt_time(target['last_seen'])}</div>
-            </div>
+            <div><div style="font-size:0.8rem; color:#888;">STATUS</div><div style="font-size:1.2rem;" class="{ 'online' if target['last_status']=='online' else 'offline' }">{target['last_status'].upper()}</div></div>
+            <div><div style="font-size:0.8rem; color:#888;">LAST SEEN</div><div style="font-size:1.2rem; color:#fff;">{fmt_time(target['last_seen'])}</div></div>
         </div>
-        
-        <a href="/export/{t_id}"><button class="btn-small" style="background:#222;">DOWNLOAD CSV LOG</button></a>
-        <a href="/delete/{t_id}" onclick="return confirm('Confirm Deletion?');"><button class="btn-small" style="background:var(--neon-red); color:#fff; border:none;">DELETE</button></a>
+        <a href="/export/{t_id}"><button class="btn-small" style="background:#222;">DOWNLOAD CSV</button></a>
+        <a href="/delete/{t_id}" onclick="return confirm('Delete?');"><button class="btn-small" style="background:var(--neon-red); color:#fff; border:none;">DELETE</button></a>
     </div>
-
-    <div class="card">
-        <h2>ACTIVITY HEATMAP (24H)</h2>
-        <div class="chart-container">
-            <canvas id="activityChart"></canvas>
-        </div>
-    </div>
-
-    <div class="card">
-        <h2>RECENT SESSIONS</h2>
-        <table>
-            <tr><th>ONLINE</th><th>OFFLINE</th><th>DURATION</th></tr>
-            {session_rows}
-        </table>
-    </div>
-
+    <div class="card"><h2>ACTIVITY HEATMAP (24H)</h2><div class="chart-container"><canvas id="activityChart"></canvas></div></div>
+    <div class="card"><h2>RECENT SESSIONS</h2><table><tr><th>ONLINE</th><th>OFFLINE</th><th>DURATION</th></tr>{session_rows}</table></div>
     <script>
         const ctx = document.getElementById('activityChart');
         new Chart(ctx, {{
             type: 'bar',
             data: {{
                 labels: Array.from({{length: 24}}, (_, i) => i + ":00"),
-                datasets: [{{
-                    label: 'Activity Intensity',
-                    data: {heatmap_data},
-                    backgroundColor: 'rgba(0, 243, 255, 0.5)',
-                    borderColor: '#00f3ff',
-                    borderWidth: 1,
-                    borderRadius: 4
-                }}]
+                datasets: [{{ label: 'Activity', data: {heatmap_data}, backgroundColor: 'rgba(0, 243, 255, 0.5)', borderRadius: 4 }}]
             }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                scales: {{
-                    y: {{ beginAtZero: true, grid: {{ color: '#333' }} }},
-                    x: {{ grid: {{ display: false }} }}
-                }},
-                plugins: {{ legend: {{ display: false }} }}
-            }}
+            options: {{ responsive: true, maintainAspectRatio: false, scales: {{ y: {{ beginAtZero: true, grid: {{ color: '#333' }} }}, x: {{ grid: {{ display: false }} }} }} }}
         }});
     </script>
     """
     return await render_template_string(HTML_BASE.replace('{{ CONTENT }}', content))
 
-# --- ADD / DELETE / EXPORT ---
 @app.route('/add', methods=['GET', 'POST'])
 @login_required
 async def add():
@@ -560,25 +489,11 @@ async def add():
         tg_in = f.get('tg_input')
         tg_id = int(tg_in) if tg_in.isdigit() else 0
         tg_user = tg_in if not tg_in.isdigit() else None
-        
         async with await get_db() as db:
-            await db.execute("INSERT INTO targets (tg_id, tg_username, display_name, last_status) VALUES (?,?,?, 'unknown')",
-                             (tg_id, tg_user, f.get('name')))
+            await db.execute("INSERT INTO targets (tg_id, tg_username, display_name, last_status) VALUES (?,?,?, 'unknown')", (tg_id, tg_user, f.get('name')))
             await db.commit()
         return redirect('/dashboard')
-    
-    content = """
-    <div class="card">
-        <h2>ADD TARGET</h2>
-        <form method="POST">
-            <label>Name</label>
-            <input name="name" required>
-            <label>Telegram ID or Username (@handle)</label>
-            <input name="tg_input" required>
-            <button type="submit">INITIATE TRACKING</button>
-        </form>
-    </div>
-    """
+    content = """<div class="card"><h2>ADD TARGET</h2><form method="POST"><label>Name</label><input name="name" required><label>Telegram ID or Username (@handle)</label><input name="tg_input" required><button type="submit">INITIATE TRACKING</button></form></div>"""
     return await render_template_string(HTML_BASE.replace('{{ CONTENT }}', content))
 
 @app.route('/delete/<int:t_id>')
@@ -586,8 +501,6 @@ async def add():
 async def delete_target(t_id):
     async with await get_db() as db:
         await db.execute("DELETE FROM targets WHERE id=?", (t_id,))
-        await db.execute("DELETE FROM sessions WHERE target_id=?", (t_id,))
-        await db.execute("DELETE FROM logs WHERE target_id=?", (t_id,))
         await db.commit()
     return redirect('/dashboard')
 
@@ -595,31 +508,38 @@ async def delete_target(t_id):
 @login_required
 async def export_csv(t_id):
     async with await get_db() as db:
-        async with db.execute("SELECT * FROM sessions WHERE target_id=? ORDER BY id DESC", (t_id,)) as c:
-            rows = await c.fetchall()
-    
-    si = io.StringIO()
-    cw = csv.writer(si)
+        async with db.execute("SELECT * FROM sessions WHERE target_id=? ORDER BY id DESC", (t_id,)) as c: rows = await c.fetchall()
+    si = io.StringIO(); cw = csv.writer(si)
     cw.writerow(['Status', 'Start Time', 'End Time', 'Duration'])
-    for r in rows:
-        cw.writerow([r['status'], r['start_time'], r['end_time'], r['duration']])
-    
-    return Response(
-        si.getvalue(),
-        mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=log_{t_id}.csv"}
-    )
+    for r in rows: cw.writerow([r['status'], r['start_time'], r['end_time'], r['duration']])
+    return Response(si.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename=log_{t_id}.csv"})
 
-# --- TELEGRAM AUTH FLOW ---
+# --- TELEGRAM CONNECT (FIXED UI) ---
 @app.route('/connect', methods=['GET', 'POST'])
 @login_required
 async def connect():
-    global temp_client, phone_number, phone_code_hash
+    global temp_client, phone_number, phone_code_hash, runtime_api_id, runtime_api_hash
     msg = ""
+    
+    # Pre-fill if known
+    val_aid = runtime_api_id if runtime_api_id else ""
+    val_hash = runtime_api_hash if runtime_api_hash else ""
+    
     if request.method == 'POST':
-        phone = (await request.form).get('phone')
+        f = await request.form
+        phone = f.get('phone')
+        aid = f.get('api_id')
+        ahash = f.get('api_hash')
+        
+        # Save credentials
+        if aid and ahash:
+            runtime_api_id = int(aid)
+            runtime_api_hash = ahash
+            await save_setting('api_id', aid)
+            await save_setting('api_hash', ahash)
+            
         try:
-            temp_client = TelegramClient(StringSession(), API_ID, API_HASH)
+            temp_client = TelegramClient(StringSession(), runtime_api_id, runtime_api_hash)
             await temp_client.connect()
             send = await temp_client.send_code_request(phone)
             phone_number = phone
@@ -627,7 +547,21 @@ async def connect():
             return redirect('/verify')
         except Exception as e: msg = f"Error: {e}"
 
-    content = f"""<div class="card"><h2>LINK UPLINK</h2><div style="color:red">{msg}</div><form method="POST"><input name="phone" placeholder="+91..." required><button>SEND CODE</button></form></div>"""
+    content = f"""
+    <div class="card">
+        <h2>LINK UPLINK</h2>
+        <div style="color:red">{msg}</div>
+        <form method="POST">
+            <label>API ID (from my.telegram.org)</label>
+            <input name="api_id" value="{val_aid}" required>
+            <label>API HASH (from my.telegram.org)</label>
+            <input name="api_hash" value="{val_hash}" required>
+            <label>Phone Number</label>
+            <input name="phone" placeholder="+91..." required>
+            <button>SEND OTP</button>
+        </form>
+    </div>
+    """
     return await render_template_string(HTML_BASE.replace('{{ CONTENT }}', content))
 
 @app.route('/verify', methods=['GET', 'POST'])
@@ -639,7 +573,7 @@ async def verify():
         code = (await request.form).get('code')
         try:
             await temp_client.sign_in(phone=phone_number, code=code, phone_code_hash=phone_code_hash)
-            await save_session_string(temp_client.session.save())
+            await save_setting('session_string', temp_client.session.save())
             await temp_client.disconnect()
             asyncio.create_task(cyber_bot.start())
             return redirect('/dashboard')
@@ -657,7 +591,7 @@ async def two_fa():
         pw = (await request.form).get('password')
         try:
             await temp_client.sign_in(password=pw)
-            await save_session_string(temp_client.session.save())
+            await save_setting('session_string', temp_client.session.save())
             await temp_client.disconnect()
             asyncio.create_task(cyber_bot.start())
             return redirect('/dashboard')

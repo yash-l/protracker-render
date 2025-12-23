@@ -17,7 +17,7 @@ from hypercorn.config import Config
 from hypercorn.asyncio import serve
 
 # --- CONFIGURATION (ENV VARS) ---
-API_ID = int(os.getenv("API_ID", "0"))  # Replace with yours if local
+API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
@@ -35,7 +35,6 @@ app.secret_key = SECRET_KEY
 
 # Global State
 bot_client = None
-shutdown_event = asyncio.Event()
 
 # --- DATABASE SCHEMA (SQLite) ---
 DB_SCHEMA = """
@@ -90,7 +89,6 @@ HTML_BASE = """
         * { box-sizing: border-box; font-family: 'Courier New', monospace; }
         body { background: var(--bg); color: var(--text-main); margin: 0; padding: 0; overflow-x: hidden; }
         
-        /* SCANLINE EFFECT */
         body::before {
             content: " ";
             display: block;
@@ -104,16 +102,13 @@ HTML_BASE = """
 
         .container { max-width: 800px; margin: 0 auto; padding: 20px; z-index: 3; position: relative; }
         
-        /* HEADER */
         .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid var(--neon-green); padding-bottom: 10px; margin-bottom: 20px; }
         .logo { font-size: 1.5rem; font-weight: bold; color: var(--neon-green); text-shadow: 0 0 5px var(--neon-green); }
         .user-badge { font-size: 0.8rem; color: var(--neon-blue); }
 
-        /* CARDS */
         .card { background: var(--panel); border: 1px solid #333; padding: 15px; margin-bottom: 15px; position: relative; }
         .card::after { content: ''; position: absolute; top: 0; right: 0; width: 0; height: 0; border-style: solid; border-width: 0 20px 20px 0; border-color: transparent var(--neon-green) transparent transparent; }
         
-        /* GLITCH TEXT */
         .status-online { color: var(--neon-green); font-weight: bold; animation: pulse 2s infinite; }
         .status-offline { color: var(--neon-red); }
         
@@ -123,23 +118,17 @@ HTML_BASE = """
             100% { opacity: 1; text-shadow: 0 0 5px var(--neon-green); }
         }
 
-        /* FORMS & BUTTONS */
         input, select { background: #000; border: 1px solid var(--neon-blue); color: #fff; padding: 10px; width: 100%; margin-bottom: 10px; }
         button { background: var(--neon-green); color: #000; border: none; padding: 10px 20px; font-weight: bold; cursor: pointer; text-transform: uppercase; width: 100%; }
         button:hover { background: #fff; box-shadow: 0 0 10px var(--neon-green); }
-        .btn-danger { background: var(--neon-red); color: #fff; }
-
-        /* TABLES */
+        
         table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
         th { text-align: left; color: var(--neon-blue); border-bottom: 1px solid var(--neon-blue); padding: 5px; }
         td { padding: 8px 5px; border-bottom: 1px solid #222; }
 
-        /* NAV */
         .nav { display: flex; gap: 10px; margin-bottom: 20px; }
         .nav a { color: var(--text-dim); text-decoration: none; padding: 5px 10px; border: 1px solid transparent; }
         .nav a.active { color: var(--neon-green); border-color: var(--neon-green); }
-        
-        .hardware-monitor { font-size: 0.7rem; color: var(--text-dim); text-align: right; margin-top: -10px; margin-bottom: 20px; }
     </style>
 </head>
 <body>
@@ -187,30 +176,34 @@ class CyberTracker:
         while self.tracking_active:
             try:
                 async with aiosqlite.connect('tracker.db') as db:
-                    # Fetch all targets
                     async with db.execute("SELECT id, tg_id, last_status FROM targets WHERE is_tracking = 1") as cursor:
                         targets = await cursor.fetchall()
                     
                     for row in targets:
                         t_id, tg_id, last_status = row
                         try:
-                            entity = await self.client.get_entity(tg_id)
+                            # Verify entity exists and get status
+                            try:
+                                entity = await self.client.get_entity(tg_id)
+                            except ValueError:
+                                continue # Skip invalid entities
+                                
                             status = entity.status
-                            
                             new_status = 'offline'
+                            
                             if isinstance(status, UserStatusOnline):
                                 new_status = 'online'
+                            elif isinstance(status, UserStatusRecently):
+                                # Sometimes 'Recently' is sent but they are actively online, 
+                                # but usually we treat this as offline or 'away'.
+                                # For strict online tracking, we keep it as offline.
+                                pass 
                             
-                            # Update if changed
                             if new_status != last_status:
                                 now = datetime.now(TZ)
                                 await db.execute("UPDATE targets SET last_status = ?, last_seen = ? WHERE id = ?", (new_status, now, t_id))
-                                
-                                # Log Event
                                 await db.execute("INSERT INTO logs (target_id, event_type, timestamp) VALUES (?, ?, ?)", (t_id, new_status.upper(), now))
                                 await db.commit()
-                                
-                                # Smart Alert (Anti-Jitter would go here - simplified for single file)
                                 if new_status == 'online':
                                     logger.info(f"Target {tg_id} came ONLINE.")
                         
@@ -220,7 +213,7 @@ class CyberTracker:
             except Exception as e:
                 logger.error(f"Loop Error: {e}")
             
-            await asyncio.sleep(5) # Check every 5 seconds
+            await asyncio.sleep(5) 
 
 cyber_bot = CyberTracker()
 
@@ -267,7 +260,8 @@ async def login():
             session['is_admin'] = bool(user[1])
             return redirect(url_for('dashboard'))
         else:
-            return render_template_string(HTML_BASE + """
+            # FIXED: Added await
+            return await render_template_string(HTML_BASE + """
             {% block content %}
             <div class="card" style="max-width: 400px; margin: 50px auto; text-align: center;">
                 <h2 class="logo">ACCESS DENIED</h2>
@@ -277,7 +271,8 @@ async def login():
             {% endblock %}
             """)
 
-    return render_template_string(HTML_BASE + """
+    # FIXED: Added await
+    return await render_template_string(HTML_BASE + """
     {% block content %}
     <div class="card" style="max-width: 400px; margin: 100px auto;">
         <h2 class="logo" style="text-align: center;">SYSTEM LOGIN</h2>
@@ -297,7 +292,6 @@ async def dashboard():
     is_admin = session['is_admin']
     
     async with aiosqlite.connect('tracker.db') as db:
-        # Fetch targets based on role
         if is_admin:
             query = "SELECT id, display_name, last_status, last_seen, phone FROM targets"
             args = ()
@@ -336,9 +330,6 @@ async def dashboard():
                 PHONE: {{ target[4] }}<br>
                 LAST SEEN: {{ target[3] }}
             </div>
-            <div style="margin-top: 10px; border-top: 1px dashed #333; padding-top: 5px;">
-                <a href="/report/{{ target[0] }}" style="color: var(--neon-blue); text-decoration: none;">[ VIEW_INTEL ]</a>
-            </div>
         </div>
         {% endfor %}
         
@@ -348,22 +339,22 @@ async def dashboard():
     </div>
     {% endblock %}
     """
-    # Quick hack to inject the base template for rendering
+    
+    # Template hack setup
     full_template = html.replace('{% extends "layout.html" %}', HTML_BASE.replace('{% block content %}{% endblock %}', '{% block content %}REPLACE_ME{% endblock %}'))
     full_template = full_template.replace('REPLACE_ME', html.split('{% block content %}')[1].split('{% endblock %}')[0])
     
-    return render_template_string(full_template, targets=targets, session=session)
+    # FIXED: Added await
+    return await render_template_string(full_template, targets=targets, session=session)
 
 @app.route('/add', methods=['GET', 'POST'])
 @login_required
 async def add_target():
     if request.method == 'POST':
-        tg_id = request.form.get('tg_id')
-        phone = request.form.get('phone')
-        name = request.form.get('name')
-        
-        # Validation Logic (Dual Input Check)
-        # For this version, we trust the ID, but save the phone for display
+        form = await request.form
+        tg_id = form.get('tg_id')
+        phone = form.get('phone')
+        name = form.get('name')
         
         async with aiosqlite.connect('tracker.db') as db:
             await db.execute("INSERT INTO targets (owner_id, tg_id, phone, display_name, last_status) VALUES (?, ?, ?, ?, 'unknown')", 
@@ -371,7 +362,8 @@ async def add_target():
             await db.commit()
         return redirect(url_for('dashboard'))
 
-    return render_template_string(HTML_BASE + """
+    # FIXED: Added await
+    return await render_template_string(HTML_BASE + """
     {% block content %}
     <div class="header"><div class="logo">ADD TARGET</div></div>
     <div class="card">
@@ -405,7 +397,8 @@ async def admin_panel():
         async with db.execute("SELECT id, username, status FROM users") as cursor:
             users = await cursor.fetchall()
             
-    return render_template_string(HTML_BASE + """
+    # FIXED: Added await
+    return await render_template_string(HTML_BASE + """
     {% block content %}
     <div class="header">
         <div class="logo">ADMIN_PANEL // GOD_MODE</div>
@@ -416,7 +409,6 @@ async def admin_panel():
         <h3>SYSTEM_STATUS</h3>
         <p>BOT STATE: <span style="color: var(--neon-green);">ONLINE</span></p>
         <p>DATABASE: CONNECTED</p>
-        <p>RAM USAGE: 12% (NOMINAL)</p>
     </div>
 
     <div class="card">
@@ -441,7 +433,6 @@ async def admin_panel():
     {% endblock %}
     """, users=users)
 
-# --- LIFECYCLE MANAGERS ---
 @app.before_serving
 async def startup():
     await init_db()
@@ -452,10 +443,7 @@ async def shutdown():
     if cyber_bot.client:
         await cyber_bot.client.disconnect()
 
-# --- ENTRY POINT ---
 if __name__ == "__main__":
-    # Termux/Local Dev: Run directly
-    # Cloud (Render): Uses Hypercorn via Procfile
     config = Config()
     config.bind = [f"0.0.0.0:{os.getenv('PORT', '8000')}"]
     asyncio.run(serve(app, config))
